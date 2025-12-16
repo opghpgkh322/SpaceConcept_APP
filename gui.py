@@ -1358,6 +1358,7 @@ class MaterialsTab(QWidget):
         self.table.blockSignals(False)
         self._materials_loading = False
 
+
     def on_materials_item_changed(self, item):
         if getattr(self, "_materials_loading", False):
             return
@@ -2400,6 +2401,12 @@ class WarehouseTab(QWidget):
         add_group.setLayout(add_layout)
         main_layout.addWidget(add_group)
 
+        # Поиск по складу (по материалам)
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Поиск по материалам на складе…")
+        self.search_input.textChanged.connect(self.filter_warehouse_table)
+        main_layout.addWidget(self.search_input)
+
         # Таблица склада
         self.table = QTableWidget()
         self.table.setColumnCount(4)
@@ -2430,6 +2437,8 @@ class WarehouseTab(QWidget):
         main_layout.addWidget(cloud_group)
 
         self.setLayout(main_layout)
+
+
 
     def cloud_download(self):
         token = "y0__xDGx8DJARjrnzsgnMHG-BR-KZ19Xw3vp5ZtUe-FRHIfDz_1sA"
@@ -2659,6 +2668,14 @@ class WarehouseTab(QWidget):
             )
             self.table.setRowHidden(r, text not in row_text)
 
+    def filter_warehouse_table(self, text: str):
+        """Фильтр на складе: ищем только по колонке 'Материал'."""
+        text = (text or "").strip().lower()
+
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, 1)  # 1 = колонка "Материал"
+            material = item.text().lower() if item else ""
+            self.table.setRowHidden(r, text not in material)
 
 class OrdersTab(QWidget):
     def __init__(self, db_path, main_window):
