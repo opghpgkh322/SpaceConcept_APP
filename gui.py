@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QTableWidget
                              QTableWidgetItem, QPushButton, QVBoxLayout, QWidget,
                              QHeaderView, QMessageBox, QLabel, QLineEdit, QComboBox,
                              QHBoxLayout, QFormLayout, QGroupBox, QSpinBox, QDoubleSpinBox, QTextEdit,
-                             QDialog, QSplitter,QFileDialog)
+                             QDialog, QSplitter, QFileDialog, QAbstractItemView)
 from PyQt5.QtCore import Qt
 
 # ИСПРАВЛЕНИЕ 1: Улучшенная регистрация шрифта Arial
@@ -1174,6 +1174,9 @@ class MaterialsTab(QWidget):
         self.table.setHorizontalHeaderLabels(["ID", "Название", "Тип", "Цена"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         layout.addWidget(self.table)
+        self._materials_loading = False
+        self.table.setEditTriggers(QAbstractItemView.DoubleClicked)
+        self.table.itemChanged.connect(self.on_materials_item_changed)
 
         form_layout = QFormLayout()
 
@@ -1326,6 +1329,9 @@ class MaterialsTab(QWidget):
             delattr(self, 'selected_material_id')
 
     def load_data(self):
+        self._materials_loading = True
+        self.table.blockSignals(True)
+
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('SELECT id, name, type, price FROM materials')
@@ -1333,14 +1339,67 @@ class MaterialsTab(QWidget):
         conn.close()
 
         self.table.setRowCount(len(materials))
-        for row_idx, row_data in enumerate(materials):
-            for col_idx, col_data in enumerate(row_data):
+        for row_idx, (mid, name, mtype, price) in enumerate(materials):
+            values = [mid, name, mtype, price]
+            for col_idx, val in enumerate(values):
                 if col_idx == 3:
-                    item = QTableWidgetItem(f"{float(col_data):.2f}")
+                    item = QTableWidgetItem(f"{float(val or 0):.2f}")
                 else:
-                    item = QTableWidgetItem(str(col_data))
-                item.setFlags(item.flags() ^ Qt.ItemIsEditable)
+                    item = QTableWidgetItem(str(val))
+
+                flags = item.flags()
+                if col_idx == 3:  # редактируем только цену
+                    item.setFlags(flags | Qt.ItemIsEditable)
+                else:
+                    item.setFlags(flags & ~Qt.ItemIsEditable)
+
                 self.table.setItem(row_idx, col_idx, item)
+
+        self.table.blockSignals(False)
+        self._materials_loading = False
+
+    def on_materials_item_changed(self, item):
+        if getattr(self, "_materials_loading", False):
+            return
+
+        row = item.row()
+        col = item.column()
+        if col != 3:
+            return
+
+        try:
+            material_id = int(self.table.item(row, 0).text())
+        except Exception:
+            return
+
+        raw = (item.text() or "").strip().replace(",", ".")
+        try:
+            new_price = float(raw)
+        except ValueError:
+            new_price = None
+
+        if new_price is None or new_price < 0:
+            QMessageBox.warning(self, "Ошибка", "Цена должна быть числом >= 0")
+            self.load_data()
+            return
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cur = conn.cursor()
+            cur.execute("UPDATE materials SET price=? WHERE id=?", (new_price, material_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Отформатируем цену обратно в 2 знака
+        self._materials_loading = True
+        self.table.blockSignals(True)
+        item.setText(f"{new_price:.2f}")
+        self.table.blockSignals(False)
+        self._materials_loading = False
+
+        # Если у тебя есть пересчёт себестоимости изделий от материалов:
+        # self.recalculate_products_with_material(material_id)
 
     def add_material(self):
         name = self.name_input.text().strip()
@@ -1474,6 +1533,9 @@ class ProductsTab(QWidget):
         self.composition_table.setHorizontalHeaderLabels(["ID", "Материал", "Тип", "Количество", "Длина (м)"])
         self.composition_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         composition_layout.addWidget(self.composition_table)
+        self._composition_loading = False
+        self.composition_table.setEditTriggers(QAbstractItemView.DoubleClicked)
+        self.composition_table.itemChanged.connect(self.on_composition_item_changed)
 
         add_form_layout = QFormLayout()
         self.material_combo = QComboBox()
@@ -1556,6 +1618,9 @@ class ProductsTab(QWidget):
         self.composite_composition_table.setHorizontalHeaderLabels(["ID", "Базовое изделие", "Количество", "Стоимость"])
         self.composite_composition_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         comp_composition_layout.addWidget(self.composite_composition_table)
+        self._composite_loading = False
+        self.composite_composition_table.setEditTriggers(QAbstractItemView.DoubleClicked)
+        self.composite_composition_table.itemChanged.connect(self.on_composite_item_changed)
 
         comp_add_form = QFormLayout()
         self.basic_product_combo = QComboBox()
@@ -1654,6 +1719,9 @@ class ProductsTab(QWidget):
         if not hasattr(self, 'selected_composite_id'):
             return
 
+        self._composite_loading = True
+        self.composite_composition_table.blockSignals(True)
+
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute("""SELECT cp.id, p.name, cp.quantity, p.cost * cp.quantity
@@ -1665,10 +1733,62 @@ class ProductsTab(QWidget):
 
         self.composite_composition_table.setRowCount(len(composition))
         for row_idx, (comp_id, name, quantity, cost) in enumerate(composition):
-            self.composite_composition_table.setItem(row_idx, 0, QTableWidgetItem(str(comp_id)))
-            self.composite_composition_table.setItem(row_idx, 1, QTableWidgetItem(name))
-            self.composite_composition_table.setItem(row_idx, 2, QTableWidgetItem(str(quantity)))
-            self.composite_composition_table.setItem(row_idx, 3, QTableWidgetItem(f"{cost:.2f}"))
+            row_items = [
+                QTableWidgetItem(str(comp_id)),
+                QTableWidgetItem(name),
+                QTableWidgetItem(str(quantity)),
+                QTableWidgetItem(f"{cost:.2f}")
+            ]
+
+            for col_idx, it in enumerate(row_items):
+                flags = it.flags()
+                if col_idx == 2:  # редактируем только количество
+                    it.setFlags(flags | Qt.ItemIsEditable)
+                else:
+                    it.setFlags(flags & ~Qt.ItemIsEditable)
+                self.composite_composition_table.setItem(row_idx, col_idx, it)
+
+        self.composite_composition_table.blockSignals(False)
+        self._composite_loading = False
+
+    def on_composite_item_changed(self, item):
+        if getattr(self, "_composite_loading", False):
+            return
+
+        row = item.row()
+        col = item.column()
+        if col != 2:
+            return
+
+        try:
+            comp_id = int(self.composite_composition_table.item(row, 0).text())
+        except Exception:
+            return
+
+        raw = (item.text() or "").strip().replace(",", ".")
+        try:
+            q = int(float(raw))
+        except ValueError:
+            q = None
+
+        if q is None or q < 0:
+            QMessageBox.warning(self, "Ошибка", "Количество должно быть целым числом >= 0")
+            self.load_composite_composition()
+            return
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cur = conn.cursor()
+            if q == 0:
+                cur.execute("DELETE FROM composite_products WHERE id=?", (comp_id,))
+            else:
+                cur.execute("UPDATE composite_products SET quantity=? WHERE id=?", (q, comp_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.load_composite_composition()
+        self.calculate_composite_cost()
 
     def add_to_composite_composition(self):
         """Добавляет базовое изделие в состав составного"""
@@ -1942,6 +2062,9 @@ class ProductsTab(QWidget):
         if not hasattr(self, 'selected_product_id') or self.selected_product_id is None:
             return
 
+        self._composition_loading = True
+        self.composition_table.blockSignals(True)
+
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute("""SELECT pc.id, m.name, m.type, pc.quantity, pc.length
@@ -1953,11 +2076,83 @@ class ProductsTab(QWidget):
 
         self.composition_table.setRowCount(len(composition))
         for row_idx, (comp_id, mat_name, mat_type, quantity, length) in enumerate(composition):
-            self.composition_table.setItem(row_idx, 0, QTableWidgetItem(str(comp_id)))
-            self.composition_table.setItem(row_idx, 1, QTableWidgetItem(mat_name))
-            self.composition_table.setItem(row_idx, 2, QTableWidgetItem(mat_type))
-            self.composition_table.setItem(row_idx, 3, QTableWidgetItem(str(quantity)))
-            self.composition_table.setItem(row_idx, 4, QTableWidgetItem(str(length) if length else ""))
+            row = [
+                QTableWidgetItem(str(comp_id)),
+                QTableWidgetItem(mat_name),
+                QTableWidgetItem(mat_type),
+                QTableWidgetItem(str(quantity)),
+                QTableWidgetItem("" if length is None else str(length)),
+            ]
+
+            for col_idx, item in enumerate(row):
+                flags = item.flags()
+                # Редактируем только: Количество (3) и Длина (4)
+                if col_idx in (3, 4):
+                    item.setFlags(flags | Qt.ItemIsEditable)
+                else:
+                    item.setFlags(flags & ~Qt.ItemIsEditable)
+                self.composition_table.setItem(row_idx, col_idx, item)
+
+        self.composition_table.blockSignals(False)
+        self._composition_loading = False
+
+    def on_composition_item_changed(self, item):
+        if getattr(self, "_composition_loading", False):
+            return
+
+        row = item.row()
+        col = item.column()
+
+        # editable только quantity/length
+        if col not in (3, 4):
+            return
+
+        try:
+            comp_id = int(self.composition_table.item(row, 0).text())
+        except Exception:
+            return
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cur = conn.cursor()
+
+            if col == 3:
+                raw = (item.text() or "").strip().replace(",", ".")
+                try:
+                    q = int(float(raw))
+                except ValueError:
+                    q = None
+                if q is None or q < 0:
+                    QMessageBox.warning(self, "Ошибка", "Количество должно быть целым числом >= 0")
+                    self.load_composition()
+                    return
+                if q == 0:
+                    # логично: 0 => удалить строку состава
+                    cur.execute("DELETE FROM product_composition WHERE id=?", (comp_id,))
+                else:
+                    cur.execute("UPDATE product_composition SET quantity=? WHERE id=?", (q, comp_id))
+
+            else:  # col == 4
+                raw = (item.text() or "").strip().replace(",", ".")
+                if raw == "":
+                    cur.execute("UPDATE product_composition SET length=NULL WHERE id=?", (comp_id,))
+                else:
+                    try:
+                        l = float(raw)
+                    except ValueError:
+                        l = None
+                    if l is None or l < 0:
+                        QMessageBox.warning(self, "Ошибка", "Длина должна быть числом >= 0 (или пусто)")
+                        self.load_composition()
+                        return
+                    cur.execute("UPDATE product_composition SET length=? WHERE id=?", (l, comp_id))
+
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.load_composition()
+        self.calculate_product_cost()
 
     def add_product(self):
         """Добавляет новое базовое изделие"""
@@ -2211,6 +2406,9 @@ class WarehouseTab(QWidget):
         self.table.setHorizontalHeaderLabels(["ID", "Материал", "Длина", "Количество"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         main_layout.addWidget(self.table)
+        self._warehouse_loading = False
+        self.table.setEditTriggers(QAbstractItemView.DoubleClicked)
+        self.table.itemChanged.connect(self.on_warehouse_item_changed)
 
         # Кнопки управления
         btn_layout = QHBoxLayout()
@@ -2271,12 +2469,15 @@ class WarehouseTab(QWidget):
             self.material_combo.addItem(mat_name, mat_id)
 
     def load_data(self):
+        self._warehouse_loading = True
+        self.table.blockSignals(True)
+
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute("""SELECT w.id, m.name, w.length, w.quantity 
-        FROM warehouse w
-        JOIN materials m ON w.material_id = m.id
-        ORDER BY m.name""")
+        cursor.execute("""SELECT w.id, m.name, w.length, w.quantity
+            FROM warehouse w
+            JOIN materials m ON w.material_id = m.id
+            ORDER BY m.name""")
         warehouse = cursor.fetchall()
         conn.close()
 
@@ -2284,8 +2485,18 @@ class WarehouseTab(QWidget):
         for row_idx, row_data in enumerate(warehouse):
             for col_idx, col_data in enumerate(row_data):
                 item = QTableWidgetItem(str(col_data))
-                item.setFlags(item.flags() ^ Qt.ItemIsEditable)
+
+                # Разрешаем редактировать ТОЛЬКО "Количество" (колонка 3)
+                flags = item.flags()
+                if col_idx == 3:
+                    item.setFlags(flags | Qt.ItemIsEditable)
+                else:
+                    item.setFlags(flags & ~Qt.ItemIsEditable)
+
                 self.table.setItem(row_idx, col_idx, item)
+
+        self.table.blockSignals(False)
+        self._warehouse_loading = False
 
     def add_to_warehouse(self):
         material_id = self.material_combo.currentData()
@@ -2348,6 +2559,57 @@ class WarehouseTab(QWidget):
             conn.close()
             self.load_data()
             QMessageBox.information(self, "Успех", "Запись удалена")
+
+    def on_warehouse_item_changed(self, item):
+        if getattr(self, "_warehouse_loading", False):
+            return
+
+        row = item.row()
+        col = item.column()
+
+        # редактируем только "Количество"
+        if col != 3:
+            return
+
+        try:
+            item_id = int(self.table.item(row, 0).text())
+        except Exception:
+            return
+
+        raw = (item.text() or "").strip().replace(",", ".")
+        try:
+            new_qty = int(float(raw))
+        except ValueError:
+            new_qty = None
+
+        if new_qty is None or new_qty < 0:
+            QMessageBox.warning(self, "Ошибка", "Количество должно быть целым числом >= 0")
+            self._warehouse_loading = True
+            self.table.blockSignals(True)
+            # откатим значение из БД
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT quantity FROM warehouse WHERE id=?", (item_id,))
+            db_qty = cur.fetchone()
+            conn.close()
+            item.setText(str(db_qty[0] if db_qty else 0))
+            self.table.blockSignals(False)
+            self._warehouse_loading = False
+            return
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cur = conn.cursor()
+            if new_qty == 0:
+                cur.execute("DELETE FROM warehouse WHERE id=?", (item_id,))
+            else:
+                cur.execute("UPDATE warehouse SET quantity=? WHERE id=?", (new_qty, item_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Перезагрузим таблицу, чтобы корректно исчезали строки при qty=0
+        self.load_data()
 
     def on_warehouse_material_changed(self, material_text):
         """
