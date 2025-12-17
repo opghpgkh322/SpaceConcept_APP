@@ -453,9 +453,9 @@ class StagesTab(QWidget):
         materials_layout = QVBoxLayout()
 
         self.stage_materials_table = QTableWidget()
-        self.stage_materials_table.setColumnCount(7)
+        self.stage_materials_table.setColumnCount(8)
         self.stage_materials_table.setHorizontalHeaderLabels(
-            ["ID", "Материал", "Тип", "Часть", "Количество", "Длина", "Стоимость"]
+            ["ID", "Материал", "Тип", "Часть", "Количество", "Длина", "Цельный", "Стоимость"]
         )
         self.stage_materials_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.stage_materials_table.cellChanged.connect(self.on_stage_material_cell_edited)
@@ -654,20 +654,59 @@ class StagesTab(QWidget):
                     self.load_stage_materials()
                     return
 
-                conn = sqlite3.connect(self.db_path)
-                cursor = conn.cursor()
-                cursor.execute("UPDATE stage_materials SET length = ? WHERE id = ?", (new_length, sm_id))
-                conn.commit()
-                conn.close()
+                elif column == 6:  # Цельный отрезок (merge_to_single)
+                    item = self.stage_materials_table.item(row, column)
+                    new_val = 1 if item and item.checkState() == Qt.Checked else 0
 
-                self.load_stage_materials()
-                self.calculate_stage_cost()
+                    conn = sqlite3.connect(self.db_path)
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE stage_materials SET merge_to_single = ? WHERE id = ?", (new_val, sm_id))
+                    conn.commit()
+                    conn.close()
+
+                    self.load_stage_materials()
+                    self.calculate_stage_cost()
+
+                    conn = sqlite3.connect(self.db_path)
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE stage_materials SET length = ? WHERE id = ?", (new_length, sm_id))
+                    conn.commit()
+                    conn.close()
+
+                    self.load_stage_materials()
+                    self.calculate_stage_cost()
 
         except (ValueError, TypeError):
             QMessageBox.warning(self, "Ошибка", "Некорректное значение")
             self.load_stage_materials()
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Ошибка при обновлении: {str(e)}")
+            self.load_stage_materials()
+
+    def on_stage_material_item_changed(self, item):
+        # Реагируем только на колонку "Цельный"
+        if item is None or item.column() != 6:
+            return
+
+        try:
+            row = item.row()
+            sm_id = int(self.stage_materials_table.item(row, 0).text())
+            new_val = 1 if item.checkState() == Qt.Checked else 0
+
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE stage_materials SET merge_to_single = ? WHERE id = ?",
+                (new_val, sm_id)
+            )
+            conn.commit()
+            conn.close()
+
+            # чтобы стоимость этапа пересчиталась
+            self.calculate_stage_cost()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка при обновлении merge_to_single: {e}")
             self.load_stage_materials()
 
     def on_stage_cell_edited(self, row, column):
@@ -784,7 +823,7 @@ class StagesTab(QWidget):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT sm.id, m.name, m.type, sm.part, sm.quantity, sm.length, m.price,
+            SELECT sm.id, m.name, m.type, sm.part, sm.quantity, sm.length, sm.merge_to_single, m.price,
                    CASE 
                        WHEN m.type = 'Пиломатериал' AND sm.length IS NOT NULL 
                        THEN (m.price * sm.quantity * sm.length)
@@ -797,11 +836,11 @@ class StagesTab(QWidget):
         stage_materials = cursor.fetchall()
         conn.close()
 
+        self.stage_materials_table.blockSignals(True)
         self.stage_materials_table.cellChanged.disconnect()
         self.stage_materials_table.setRowCount(len(stage_materials))
 
-        for row_idx, (sm_id, mat_name, mat_type, part, quantity, length, price, total_cost) in enumerate(
-                stage_materials):
+        for row_idx, (sm_id, mat_name, mat_type, part, quantity, length, merge_to_single, price, total_cost) in enumerate(stage_materials):
             id_item = QTableWidgetItem(str(sm_id))
             id_item.setFlags(id_item.flags() ^ Qt.ItemIsEditable)
             self.stage_materials_table.setItem(row_idx, 0, id_item)
@@ -824,9 +863,16 @@ class StagesTab(QWidget):
 
             cost_item = QTableWidgetItem(f"{total_cost:.2f} руб")
             cost_item.setFlags(cost_item.flags() ^ Qt.ItemIsEditable)
-            self.stage_materials_table.setItem(row_idx, 6, cost_item)
+            self.stage_materials_table.setItem(row_idx, 7, cost_item)
+
+            merge_item = QTableWidgetItem()
+            merge_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            merge_item.setCheckState(Qt.Checked if int(merge_to_single) == 1 else Qt.Unchecked)
+            self.stage_materials_table.setItem(row_idx, 6, merge_item)
 
         self.stage_materials_table.cellChanged.connect(self.on_stage_material_cell_edited)
+        self.stage_materials_table.itemChanged.connect(self.on_stage_material_item_changed)
+        self.stage_materials_table.blockSignals(False)
 
     def calculate_stage_cost(self):
         """Рассчитывает себестоимость этапа с учетом составных изделий"""
