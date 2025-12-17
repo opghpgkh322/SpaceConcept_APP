@@ -3415,7 +3415,7 @@ class OrdersTab(QWidget):
             # Итоговые расчеты
             instructions = "📊 Расчет заказа:\n\n"
             instructions += f"💰 Себестоимость: {total_cost:.2f} руб\n"
-            instructions += f"💰 Цена реализации: {total_cost * 2:.2f} руб\n\n"
+            instructions += f"💰 Цена реализации: {total_cost * 4:.2f} руб\n\n"
             instructions += materials_message + availability
 
             self.instructions_text.setText(instructions)
@@ -4002,7 +4002,7 @@ class OrdersTab(QWidget):
             story.append(Paragraph(f"Заказ от {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", title_style))
             story.append(Spacer(1, 12))
             story.append(Paragraph(f"Себестоимость: {total_cost:.2f} руб", heading_style))
-            sale_price = total_cost * 2
+            sale_price = total_cost * 4
             story.append(Paragraph(f"Цена реализации: {sale_price:.2f} руб", heading_style))
             story.append(Spacer(1, 12))
             story.append(Paragraph("Состав заказа:", heading_style))
@@ -4030,14 +4030,235 @@ class OrdersTab(QWidget):
 
             # Инструкции (если есть)
             if instructions_text:
-                story.append(Paragraph("Подробные инструкции:", heading_style))
-                # Важно: Paragraph понимает <br/>, а также простую разметку <b>/<u>
-                formatted_instructions = instructions_text.replace("\n", "<br/>")
+                import re
+                from collections import defaultdict
+                from reportlab.platypus import HRFlowable
 
-                # Чуть больше “воздуха” между логическими блоками
-                formatted_instructions = formatted_instructions.replace("<br/><br/>", "<br/>&nbsp;<br/>")
+                # ---------------------------------------------------------
+                # 1) Парсим секцию "План распила материалов" из instructions_text
+                #    plan[material] = [ { 'stock': float, 'cuts': [(len, dest), ...], 'tail': [str...] }, ... ]
+                # ---------------------------------------------------------
+                lines = instructions_text.splitlines()
 
-                story.append(Paragraph(formatted_instructions, normal_style))
+                in_plan = False
+                current_material = None
+                current_block = None
+
+                plan = defaultdict(list)
+                all_dests = set()
+
+                re_stock = re.compile(r"^Взять отрезок\s+([0-9]+(?:\.[0-9]+)?)м:\s*$", re.IGNORECASE)
+                re_cut = re.compile(r"^\s*\d+\.\s*Отпилить\s+([0-9]+(?:\.[0-9]+)?)м\s+для\s+'([^']+)'\s*$",
+                                    re.IGNORECASE)
+                re_mat = re.compile(r"^(.+):\s*$")
+
+                def _strip_tags(s: str) -> str:
+                    return re.sub(r"<[^>]+>", "", s).strip()
+
+                for raw in lines:
+                    s = raw.rstrip()
+
+                    if s.strip().lower().startswith("план распила материалов"):
+                        in_plan = True
+                        current_material = None
+                        current_block = None
+                        continue
+
+                    if not in_plan:
+                        continue
+
+                    # пропускаем блок "Разбивка по изделиям" и строки вида "- '...': ..."
+                    if s.strip().lower().startswith("разбивка по"):
+                        continue
+                    if s.strip().startswith("- "):
+                        continue
+
+                    # заголовок материала: "Доска террасная:"
+                    m_mat = re_mat.match(_strip_tags(s.strip()))
+                    if m_mat and "взять отрезок" not in s.lower() and "остаток:" not in s.lower() and "отпилить" not in s.lower():
+                        current_material = m_mat.group(1).strip()
+                        current_block = None
+                        continue
+
+                    # начало блока: "Взять отрезок 6.00м:"
+                    m_stock = re_stock.match(_strip_tags(s.strip()))
+                    if m_stock and current_material:
+                        current_block = {"stock": float(m_stock.group(1)), "cuts": [], "tail": []}
+                        plan[current_material].append(current_block)
+                        continue
+
+                    # строка распила: "1. Отпилить 0.35м для 'Блин'"
+                    m_cut = re_cut.match(_strip_tags(s.strip()))
+                    if m_cut and current_material and current_block:
+                        cut_len = float(m_cut.group(1))
+                        dest = m_cut.group(2).strip()
+                        current_block["cuts"].append((cut_len, dest))
+                        all_dests.add(dest)
+                        continue
+
+                    # хвосты блока (например "Остаток: ...") — привяжем к текущему блоку
+                    if current_block and _strip_tags(s.strip()).lower().startswith("остаток:"):
+                        current_block["tail"].append(_strip_tags(s.strip()))
+                        continue
+
+                # ---------------------------------------------------------
+                # 2) Рендерим план ПО ЕДИНИЦАМ ЗАКАЗА (из order_items)
+                #    Для этапа включаем также изделия внутри этапа (stage_products).
+                # ---------------------------------------------------------
+                # === ЗАТРАЧЕННЫЕ МАТЕРИАЛЫ (берём из instructions_text, без плана распила) ===
+                def _extract_spent_materials(text):
+                    lines = text.splitlines()
+                    start = None
+                    end = None
+
+                    for i, ln in enumerate(lines):
+                        if ln.strip().lower().startswith("затраченные материалы"):
+                            start = i + 1
+                            continue
+                        if start is not None and ln.strip().lower().startswith("план распила материалов"):
+                            end = i
+                            break
+
+                    if start is None:
+                        return []
+
+                    if end is None:
+                        end = len(lines)
+
+                    out = []
+                    for ln in lines[start:end]:
+                        ln = ln.strip()
+                        if not ln:
+                            continue
+                        # на всякий случай отсекаем служебные заголовки
+                        if ln.lower().startswith(""):
+                            continue
+                        out.append(ln)
+                    return out
+
+                def _build_spent_materials_from_requirements(reqs):
+                    out = []
+                    conn = sqlite3.connect(self.db_path)
+                    cursor = conn.cursor()
+
+                    for material in sorted(reqs.keys()):
+                        cursor.execute("SELECT type FROM materials WHERE name = ?", (material,))
+                        row = cursor.fetchone()
+                        mtype = row[0] if row else ""
+
+                        total = 0.0
+                        for qty, _src in reqs[material]:
+                            total += float(qty)
+
+                        if mtype == "Пиломатериал":
+                            out.append(f"{material}: {total:.2f} м")
+                        else:
+                            out.append(f"{material}: {int(round(total))} шт")
+
+                    conn.close()
+                    return out
+
+                spent_lines = _build_spent_materials_from_requirements(requirements)
+
+                if spent_lines:
+                    story.append(Paragraph("Затраченные материалы:", heading_style))
+                    story.append(Spacer(1, 6))
+                    for ln in spent_lines:
+                        story.append(Paragraph(ln, normal_style))
+                    story.append(Spacer(1, 12))
+
+                story.append(Paragraph("План распила материалов:", heading_style))
+                story.append(Spacer(1, 8))
+
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+
+                def _destinations_for_stage(stage_id, stage_name):
+                    cursor.execute("""
+                        SELECT p.name
+                        FROM stage_products sp
+                        JOIN products p ON sp.product_id = p.id
+                        WHERE sp.stage_id = ?
+                    """, (stage_id,))
+                    base = [r[0] for r in cursor.fetchall()]
+
+                    dests = {stage_name}
+                    for bn in base:
+                        # включаем точные совпадения и варианты вида "Имя(2шт)", если они реально встречаются
+                        for d in all_dests:
+                            if d == bn or d.startswith(bn + "("):
+                                dests.add(d)
+                    return dests
+
+                # db_items ты уже получаешь выше в _generate_pdf (order_items ORDER BY id)
+                # Перебираем их, чтобы заголовки совпадали с единицами заказа
+                for name, qty, cost, item_type, length_m, stage_id in db_items:
+                    if item_type == "stage":
+                        length_val = 1.0 if (length_m is None or float(length_m) <= 0) else float(length_m)
+                        unit_header = f'Этап "{name}": длина {length_val:.2f} м'
+                        unit_dests = _destinations_for_stage(stage_id, name)
+                    else:
+                        unit_header = f'Изделие "{name}" - {int(qty)} шт'
+                        # на всякий случай подтягиваем и варианты "(Nшт)" если такие когда-то попадут в текст
+                        unit_dests = {name}
+                        for d in all_dests:
+                            if d.startswith(name + "("):
+                                unit_dests.add(d)
+
+                    # Заголовок единицы заказа (подчеркнутый)
+                    story.append(Spacer(1, 10))
+                    story.append(Paragraph(f"<b><u>{unit_header}</u></b>", heading_style))
+                    story.append(Spacer(1, 4))
+
+                    found_any = False
+
+                    # Для каждой единицы заказа выводим только те распилы, чьё назначение входит в unit_dests
+                    for material in sorted(plan.keys()):
+                        blocks_for_unit = []
+                        total_pieces = 0
+                        total_len = 0.0
+
+                        # фильтруем распилы по назначениям
+                        for blk in plan[material]:
+                            cuts = [(l, d) for (l, d) in blk["cuts"] if d in unit_dests]
+                            if not cuts:
+                                continue
+                            blocks_for_unit.append({"stock": blk["stock"], "cuts": cuts, "tail": blk["tail"]})
+                            total_pieces += len(cuts)
+                            total_len += sum(l for l, _ in cuts)
+
+                        if not blocks_for_unit:
+                            continue
+
+                        found_any = True
+
+                        # Название материала (подчёркнуто) + линия-разделитель под ним (требование)
+                        story.append(Paragraph(f"<b><u>{material}</u></b>", normal_style))
+                        story.append(HRFlowable(width="100%", thickness=0.6, color=colors.lightgrey))
+                        story.append(Spacer(1, 4))
+
+                        # Сводка по материалу в рамках этой единицы заказа
+                        story.append(
+                            Paragraph(f"{material}: {total_pieces} отрезков, всего {total_len:.2f} м", normal_style))
+                        story.append(Spacer(1, 4))
+
+                        # Детализация по каждой заготовке
+                        for blk in blocks_for_unit:
+                            story.append(Paragraph(f"Взять отрезок {blk['stock']:.2f}м:", normal_style))
+                            for i, (l, d) in enumerate(blk["cuts"], 1):
+                                story.append(Paragraph(f"{i}. Отпилить {l:.2f}м для '{d}'", normal_style))
+                            for t in blk["tail"]:
+                                story.append(Paragraph(t, normal_style))
+                            story.append(Spacer(1, 8))
+
+                    if not found_any:
+                        story.append(
+                            Paragraph("(Распил пиломатериалов для этой единицы заказа не требуется)", normal_style))
+
+                conn.close()
+
+                # Если хочешь оставить “прочие инструкции” (метизы/сборка) — выводим весь текст ниже
+                story.append(Spacer(1, 12))
 
             doc.build(story)
             QMessageBox.information(self, "Успех", f"PDF создан: {pdf_path}")
