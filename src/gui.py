@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QTableWidget
                              QTableWidgetItem, QPushButton, QVBoxLayout, QWidget,
                              QHeaderView, QMessageBox, QLabel, QLineEdit, QComboBox,
                              QHBoxLayout, QFormLayout, QGroupBox, QSpinBox, QDoubleSpinBox, QTextEdit,
-                             QDialog, QSplitter, QFileDialog, QAbstractItemView, QCheckBox)
+                             QDialog, QSplitter, QFileDialog, QAbstractItemView, QCheckBox, QInputDialog)
 from PyQt5.QtCore import Qt
 
 # ИСПРАВЛЕНИЕ 1: Улучшенная регистрация шрифта Arial
@@ -2846,10 +2846,13 @@ class OrdersTab(QWidget):
         self.calculate_rope_btn.clicked.connect(self.calculate_safety_rope)
         btn_layout.addWidget(self.calculate_rope_btn)
 
-        self.import_txt_btn = QPushButton("Импорт из .txt заказа")
+        self.import_txt_btn = QPushButton("Импорт из .txt")
         self.import_txt_btn.clicked.connect(self.import_order_from_txt)
         btn_layout.addWidget(self.import_txt_btn)
 
+        self.export_txt_btn = QPushButton("Экспорт в .txt")
+        self.export_txt_btn.clicked.connect(self.export_order_to_txt)
+        btn_layout.addWidget(self.export_txt_btn)
 
         self.setLayout(main_layout)
 
@@ -2859,13 +2862,59 @@ class OrdersTab(QWidget):
         self._last_calc_result = None
         self._last_calc_requirements = None
 
+    def _get_orders_txt_dir(self):
+        """
+        Папка для txt-шаблонов заказов.
+        dev (main.py): рядом с database.db
+        frozen (.exe): рядом с exe
+        """
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            # db_path у тебя указывает на .../data/database.db
+            base_dir = os.path.dirname(self.db_path)
+
+        txt_dir = os.path.join(base_dir, "orders_txt")
+        os.makedirs(txt_dir, exist_ok=True)
+        return txt_dir
+
     def import_order_from_txt(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Выберите .txt файл заказа", "", "Text Files (*.txt)")
-        if not file_path:
+        txt_dir = self._get_orders_txt_dir()
+        files = [f for f in os.listdir(txt_dir) if f.lower().endswith(".txt")]
+        files.sort()
+
+        if not files:
+            QMessageBox.information(self, "Импорт заказа", f"В папке нет .txt файлов:\n{txt_dir}")
             return
+
+        file_name, ok = QInputDialog.getItem(
+            self,
+            "Импорт заказа",
+            "Выберите файл:",
+            files,
+            0,
+            False
+        )
+        if not ok or not file_name:
+            return
+
+        file_path = os.path.join(txt_dir, file_name)
+
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 txt = f.read()
+
+            # Новый формат (V2)
+            if "ORDER_TXT_V2" in txt:
+                items = self.parse_order_txt_v2(txt)
+                if not items:
+                    QMessageBox.warning(self, "Импорт заказа", "Файл пуст или имеет неверный формат.")
+                    return
+                self.fill_order_table_from_txt_v2(items)
+                QMessageBox.information(self, "Импорт заказа", "Заказ успешно импортирован!")
+                return
+
+            # Старый формат (только изделия) — оставляем обратную совместимость
             items = self.parse_order_txt(txt)
             if not items:
                 QMessageBox.warning(self, "Импорт заказа", "В файле не удалось найти позиции заказа!")
@@ -2875,16 +2924,68 @@ class OrdersTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка импорта", str(e))
 
-    def parse_order_txt(self, txt):
-        """
-        Находит в .txt такие строки:
-        1. Изделие "Зигзаг" - 1 шт...
-        Возвращает: список словарей [{"name": "...", "qty": ...}]
-        """
-        matches = re.findall(r'Изделие\s+"([^"]+)"\s*-\s*(\d+)\s*шт', txt)
+    def export_order_to_txt(self):
+        try:
+            if self.order_table.rowCount() == 0:
+                QMessageBox.warning(self, "Экспорт заказа", "Заказ пуст — нечего экспортировать.")
+                return
+
+            name, ok = QInputDialog.getText(self, "Экспорт заказа", "Введите название файла (без .txt):")
+            if not ok:
+                return
+            name = (name or "").strip()
+            if not name:
+                QMessageBox.warning(self, "Экспорт заказа", "Название файла не может быть пустым.")
+                return
+
+            # чистим имя файла от запрещённых символов Windows
+            name = re.sub(r'[\\\\/:*?\"<>|]+', "_", name)
+
+            txt_dir = self._get_orders_txt_dir()
+            file_path = os.path.join(txt_dir, f"{name}.txt")
+
+            lines = []
+            lines.append("ORDER_TXT_V2")
+            lines.append(f"NAME={name}")
+
+            for row in range(self.order_table.rowCount()):
+                t = self.order_table.item(row, 0).text().strip()
+                id_ = int(self.order_table.item(row, 1).data(Qt.UserRole))
+                title = self.order_table.item(row, 1).text().strip()
+                qty = int(self.order_table.item(row, 2).text() or 0)
+                length = float(self.order_table.item(row, 1).data(Qt.UserRole + 2) or 0.0)
+
+                lines.append(f"ITEM|{t}|{id_}|{qty}|{length:.4f}|{title}")
+
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+
+            QMessageBox.information(self, "Экспорт заказа", f"Файл сохранён:\n{file_path}")
+
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            print(tb)
+            QMessageBox.critical(self, "Экспорт заказа", f"Ошибка экспорта: {e}\n\n{tb}")
+
+    def parse_order_txt_v2(self, txt):
         items = []
-        for name, qty in matches:
-            items.append({"name": name.strip(), "qty": int(qty)})
+        for raw in txt.splitlines():
+            raw = raw.strip()
+            if not raw or raw.startswith("#"):
+                continue
+            if raw.startswith("ITEM|"):
+                parts = raw.split("|", 5)
+                if len(parts) < 6:
+                    continue
+                _tag, t, id_s, qty_s, length_s, title = parts
+                items.append({
+                    "type": t.strip(),
+                    "id": int(id_s),
+                    "qty": int(qty_s),
+                    "length": float(length_s),
+                    "title": title.strip()
+                })
         return items
 
     def fill_order_table_from_txt(self, items):
@@ -2921,6 +3022,90 @@ class OrdersTab(QWidget):
 
         self._update_current_order()
         self.update_total_cost()
+
+    def fill_order_table_from_txt_v2(self, items):
+        self.clear_order()
+
+        for item in items:
+            t = item["type"]
+            item_id = item["id"]
+            qty = int(item["qty"])
+            length = float(item.get("length", 0.0) or 0.0)
+
+            row = self.order_table.rowCount()
+            self.order_table.insertRow(row)
+
+            self.order_table.setItem(row, 0, QTableWidgetItem(t))
+
+            name_item = QTableWidgetItem(item.get("title", ""))
+            name_item.setData(Qt.UserRole, int(item_id))
+            name_item.setData(Qt.UserRole + 1, t)
+            if t in ("Этап", "Материал"):
+                name_item.setData(Qt.UserRole + 2, float(length))
+            self.order_table.setItem(row, 1, name_item)
+
+            # Кол-во и длина в колонках таблицы
+            if t == "Этап":
+                self.order_table.setItem(row, 2, QTableWidgetItem("1"))
+                self.order_table.setItem(row, 3, QTableWidgetItem(f"{length:.2f}"))
+                # стоимость пересчитаем ниже
+            else:
+                self.order_table.setItem(row, 2, QTableWidgetItem(str(qty)))
+                self.order_table.setItem(row, 3,
+                                         QTableWidgetItem(f"{length:.2f}" if (t == "Материал" and length > 0) else ""))
+
+            # Восстановим “чистое” имя из БД и стоимость строки
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            if t == "Изделие":
+                cursor.execute("SELECT name, cost FROM products WHERE id = ?", (item_id,))
+                r = cursor.fetchone()
+                if not r:
+                    conn.close()
+                    QMessageBox.warning(self, "Импорт заказа", f"Изделие id={item_id} не найдено в БД")
+                    continue
+                real_name, unit_cost = r[0], float(r[1])
+                self.order_table.item(row, 1).setText(real_name)
+                self.order_table.setItem(row, 4, QTableWidgetItem(f"{unit_cost * qty:.2f} руб"))
+
+            elif t == "Этап":
+                cursor.execute("SELECT name FROM stages WHERE id = ?", (item_id,))
+                r = cursor.fetchone()
+                if not r:
+                    conn.close()
+                    QMessageBox.warning(self, "Импорт заказа", f"Этап id={item_id} не найден в БД")
+                    continue
+                real_name = r[0]
+                self.order_table.item(row, 1).setText(real_name)
+                cost_total = self._compute_stage_cost(stage_id=item_id, length_m=length if length > 0 else 1.0)
+                self.order_table.setItem(row, 4, QTableWidgetItem(f"{cost_total:.2f} руб"))
+
+            else:  # Материал
+                cursor.execute("SELECT name, type, price FROM materials WHERE id = ?", (item_id,))
+                r = cursor.fetchone()
+                if not r:
+                    conn.close()
+                    QMessageBox.warning(self, "Импорт заказа", f"Материал id={item_id} не найден в БД")
+                    continue
+                real_name, mtype, price = r[0], r[1], float(r[2])
+                self.order_table.item(row, 1).setText(real_name)
+
+                if mtype == "Пиломатериал":
+                    cost_total = price * qty * (length if length > 0 else 0.0)
+                else:
+                    cost_total = price * qty
+                self.order_table.setItem(row, 4, QTableWidgetItem(f"{cost_total:.2f} руб"))
+
+            conn.close()
+
+            remove_btn = QPushButton("Удалить")
+            remove_btn.clicked.connect(lambda _, r=row: self.remove_from_order(r))
+            self.order_table.setCellWidget(row, 5, remove_btn)
+
+        self._update_current_order()
+        self.update_total_cost()
+        self._invalidate_order_calculation()
 
     def calculate_rope_materials(self, routes):
         """
