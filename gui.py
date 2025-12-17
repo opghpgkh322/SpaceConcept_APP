@@ -3444,14 +3444,18 @@ class OrdersTab(QWidget):
 
                 conn = sqlite3.connect(self.db_path)
                 cursor = conn.cursor()
-                cursor.execute("SELECT is_composite FROM products WHERE id = ?", (item_id,))
+                cursor.execute("SELECT name, is_composite FROM products WHERE id = ?", (item_id,))
                 result = cursor.fetchone()
-                is_composite = result[0] if result else 0
+                product_name = result[0] if result else "Изделие"
+                is_composite = result[1] if result else 0
+
+                # ВАЖНО: source = реальное имя изделия
+                source_label = product_name
 
                 if is_composite:
-                    self._expand_composite_product_requirements(cursor, item_id, quantity, requirements, "Изделие")
+                    self._expand_composite_product_requirements(cursor, item_id, quantity, requirements, source_label)
                 else:
-                    self._expand_basic_product_requirements(cursor, item_id, quantity, requirements, "Изделие")
+                    self._expand_basic_product_requirements(cursor, item_id, quantity, requirements, source_label)
 
                 conn.close()
 
@@ -3464,11 +3468,14 @@ class OrdersTab(QWidget):
                 conn = sqlite3.connect(self.db_path)
                 cursor = conn.cursor()
 
-                # Разворачиваем материалы этапа с правильной логикой start/meter/end
-                self._expand_stage_material_requirements(cursor, item_id, length_m, requirements)
+                cursor.execute("SELECT name FROM stages WHERE id = ?", (item_id,))
+                stage_name = cursor.fetchone()[0]
 
-                # Разворачиваем изделия этапа с правильной логикой start/meter/end
-                self._expand_stage_product_requirements(cursor, item_id, length_m, requirements)
+                # Материалы, которые записаны прямо в этапе (не в составе изделий этапа) → должны подписываться именем этапа
+                self._expand_stage_material_requirements(cursor, item_id, length_m, requirements, stage_name)
+
+                # Материалы, которые приходят из изделий этапа → должны подписываться именем конкретного изделия
+                self._expand_stage_product_requirements(cursor, item_id, length_m, requirements, stage_name)
 
                 conn.close()
 
@@ -3519,7 +3526,7 @@ class OrdersTab(QWidget):
             else:
                 requirements[material].append((total_qty, source))
 
-    def _expand_stage_material_requirements(self, cursor, stage_id, length_m, requirements):
+    def _expand_stage_material_requirements(self, cursor, stage_id, length_m, requirements, stage_name):
         """
         Правильное развертывание материалов этапа с учетом частей start/meter/end
         """
@@ -3544,25 +3551,28 @@ class OrdersTab(QWidget):
             if m_type == "Пиломатериал" and length:
                 # Для пиломатериалов с длиной - добавляем каждый отрезок отдельно
                 for _ in range(int(total_qty)):
-                    requirements[material].append((length, "Этап"))
+                    requirements[material].append((length, stage_name))
             else:
                 # Для метизов и материалов без длины
-                requirements[material].append((total_qty, "Этап"))
+                requirements[material].append((total_qty, stage_name))
 
-    def _expand_stage_product_requirements(self, cursor, stage_id, length_m, requirements):
+    def _expand_stage_product_requirements(self, cursor, stage_id, length_m, requirements, stage_name):
+
         """
         Правильное развертывание изделий этапа с учетом частей start/meter/end
         """
         cursor.execute("""
-            SELECT sp.product_id, sp.quantity, sp.part, p.is_composite
+            SELECT sp.product_id, sp.quantity, sp.part, p.is_composite, p.name
             FROM stage_products sp
             JOIN products p ON sp.product_id = p.id
             WHERE sp.stage_id = ?
+
         """, (stage_id,))
 
         stage_products = cursor.fetchall()
 
-        for product_id, quantity, part, is_composite in stage_products:
+        for product_id, quantity, part, is_composite, product_name in stage_products:
+
             if part == "meter":
                 # Для meter части: количество умножаем на длину и округляем вверх
                 total_qty = math.ceil(quantity * length_m)
@@ -3573,10 +3583,19 @@ class OrdersTab(QWidget):
             # Разворачиваем изделие в материалы
             if is_composite:
                 # Разворачиваем составное изделие
-                self._expand_composite_product_requirements(cursor, product_id, total_qty, requirements, "Этап")
+                # source = конкретное изделие внутри этапа
+                source_label = product_name if product_name else stage_name
+                if total_qty and int(total_qty) > 1:
+                    source_label = f"{source_label}({int(total_qty)}шт)"
+
+                self._expand_composite_product_requirements(cursor, product_id, total_qty, requirements, source_label)
             else:
                 # Разворачиваем базовое изделие
-                self._expand_basic_product_requirements(cursor, product_id, total_qty, requirements, "Этап")
+                # source = конкретное изделие внутри этапа
+                source_label = product_name if product_name else stage_name
+                if total_qty and int(total_qty) > 1:
+                    source_label = f"{source_label}({int(total_qty)}шт)"
+                self._expand_basic_product_requirements(cursor, product_id, total_qty, requirements, source_label)
 
     def _get_product_name(self, product_id: int) -> str:
         conn = sqlite3.connect(self.db_path)
