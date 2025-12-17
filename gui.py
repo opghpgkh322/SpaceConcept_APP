@@ -392,10 +392,6 @@ class StagesTab(QWidget):
         self.delete_stage_btn.clicked.connect(self.delete_stage)
         btn_layout.addWidget(self.delete_stage_btn)
 
-        self.calculate_cost_btn = QPushButton("Рассчитать себестоимость")
-        self.calculate_cost_btn.clicked.connect(self.calculate_stage_cost)
-        btn_layout.addWidget(self.calculate_cost_btn)
-
         form_layout.addRow(btn_layout)
         stages_layout.addLayout(form_layout)
         stages_group.setLayout(stages_layout)
@@ -1515,10 +1511,6 @@ class ProductsTab(QWidget):
         self.delete_product_btn.clicked.connect(self.delete_product)
         btn_layout.addWidget(self.delete_product_btn)
 
-        self.calculate_cost_btn = QPushButton("Рассчитать себестоимость")
-        self.calculate_cost_btn.clicked.connect(self.calculate_product_cost)
-        btn_layout.addWidget(self.calculate_cost_btn)
-
         form_layout.addRow(btn_layout)
         products_layout.addLayout(form_layout)
         products_group.setLayout(products_layout)
@@ -2540,8 +2532,16 @@ class WarehouseTab(QWidget):
 
             conn.commit()
             self.load_data()
-            self.length_input.clear()
+
+            # Очищаем только количество — чтобы можно было сразу добавить тот же материал ещё раз
             self.quantity_input.clear()
+            self.quantity_input.setFocus()
+
+            # Длину не трогаем: для "Метиз" она должна оставаться 0 и поле часто заблокировано
+            # (если вдруг поле отключено и пустое — восстановим 0)
+            if not self.length_input.isEnabled() and not self.length_input.text().strip():
+                self.length_input.setText("0")
+
             QMessageBox.information(self, "Успех", "Склад обновлен!")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка базы данных", str(e))
@@ -2745,6 +2745,8 @@ class OrdersTab(QWidget):
         self.confirm_btn = QPushButton("Подтвердить заказ")
         self.confirm_btn.clicked.connect(self.confirm_order)
         btn_layout.addWidget(self.confirm_btn)
+        self.confirm_btn.setEnabled(False)
+        self.confirm_btn.setToolTip("Сначала нажмите «Рассчитать заказ» и убедитесь, что материалов достаточно.")
 
         self.clear_btn = QPushButton("Очистить заказ")
         self.clear_btn.clicked.connect(self.clear_order)
@@ -2799,6 +2801,12 @@ class OrdersTab(QWidget):
 
 
         self.setLayout(main_layout)
+
+    def _invalidate_order_calculation(self):
+        self.confirm_btn.setEnabled(False)
+        self.confirm_btn.setToolTip("Заказ изменён — пересчитайте его перед подтверждением.")
+        self._last_calc_result = None
+        self._last_calc_requirements = None
 
     def import_order_from_txt(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Выберите .txt файл заказа", "", "Text Files (*.txt)")
@@ -3188,6 +3196,7 @@ class OrdersTab(QWidget):
 
         self._update_current_order()
         self.update_total_cost()
+        self._invalidate_order_calculation()
 
     def _get_product_cost(self, product_id):
         if product_id in self.product_cost_cache:
@@ -3234,6 +3243,7 @@ class OrdersTab(QWidget):
                     widget.clicked.disconnect()
                     widget.clicked.connect(partial(self.remove_from_order, r))
             self.update_total_cost()
+            self._invalidate_order_calculation()
 
     def on_cell_double_clicked(self, row, column):
         # Редактирование количества для изделия и длины (м) для этапа
@@ -3319,7 +3329,7 @@ class OrdersTab(QWidget):
 
                 self._update_current_order()
                 self.update_total_cost()
-
+        self._invalidate_order_calculation()
     def update_total_cost(self):
         total = 0.0
         for row in range(self.order_table.rowCount()):
@@ -3332,6 +3342,7 @@ class OrdersTab(QWidget):
         self.current_order = []
         self.instructions_text.clear()
         self.total_cost_label.setText("Общая себестоимость: 0.00 руб")
+        self._invalidate_order_calculation()
 
     def calculate_order(self):
         if not self.current_order:
@@ -3368,6 +3379,16 @@ class OrdersTab(QWidget):
             stock_items = self._get_current_stock()
             optimizer = CuttingOptimizer()
             result = optimizer.optimize_cutting(req_details, stock_items, self.db_path)
+            # сохранить результат расчёта, чтобы confirm мог использовать (не обязательно, но удобно)
+            self._last_calc_result = result
+            self._last_calc_requirements = req_details  # это то, что вы отдаёте в optimize_cutting
+
+            if result.get('can_produce'):
+                self.confirm_btn.setEnabled(True)
+                self.confirm_btn.setToolTip("Материалов достаточно — можно подтверждать заказ.")
+            else:
+                self.confirm_btn.setEnabled(False)
+                self.confirm_btn.setToolTip("Материалов недостаточно — подтвердить заказ нельзя.")
 
             # Формируем сообщение по материалам
             materials_message = "📦 Требуемые материалы:\n\n"
@@ -3772,6 +3793,18 @@ class OrdersTab(QWidget):
                 QMessageBox.warning(self, "Ошибка", "Заказ пуст")
                 return
 
+            # Пересчёт требований + проверка склада прямо перед подтверждением
+            _, req_details = self._expand_order_to_requirements()
+            stock_items = self._get_current_stock()
+            optimizer = CuttingOptimizer()
+            result = optimizer.optimize_cutting(req_details, stock_items, self.db_path)
+
+            if not result.get('can_produce'):
+                self.confirm_btn.setEnabled(False)
+                QMessageBox.warning(self, "Нельзя подтвердить",
+                                    "Материалов на складе недостаточно.\nСначала пополните склад.")
+                return
+
             # 1. Составляем order_details с правильными длинами
             # ВАЖНО: Используем индекс строки из current_order для получения правильной длины
             order_details = []
@@ -3814,6 +3847,7 @@ class OrdersTab(QWidget):
 
             # 6. Создаём PDF
             self._generate_pdf(order_id, total_cost, order_details, requirements, instructions_text)
+            self._update_warehouse(result.get('updated_warehouse', []))
 
             QMessageBox.information(self, "Успех", "Заказ успешно подтверждён!")
         except Exception as e:
