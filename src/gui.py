@@ -2761,7 +2761,7 @@ class OrdersTab(QWidget):
         form_layout = QFormLayout()
 
         self.item_type_combo = QComboBox()
-        self.item_type_combo.addItems(["Изделие", "Этап"])
+        self.item_type_combo.addItems(["Изделие", "Этап", "Материал"])
         self.item_type_combo.currentTextChanged.connect(self.on_item_type_changed)
         form_layout.addRow(QLabel("Тип:"), self.item_type_combo)
 
@@ -3099,17 +3099,84 @@ class OrdersTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Ошибка при добавлении троса: {str(e)}")
 
-    def on_item_type_changed(self, item_type):
-        """Переключение между Изделием и Этапом с показом поля длины для этапа"""
+    def on_item_type_changed(self, new_type):
+        """Переключает список выбора (изделия/этапы/материалы) и видимость полей"""
         self.item_combo.clear()
-        if item_type == "Изделие":
-            self.length_spin.hide()
+
+        if new_type == "Изделие":
             self.quantity_spin.show()
-            self.load_products()
-        else:
-            self.length_spin.show()
+            self.length_spin.hide()
+
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, name FROM products ORDER BY name")
+            rows = cursor.fetchall()
+            conn.close()
+
+            for pid, name in rows:
+                self.item_combo.addItem(name, pid)
+
+        elif new_type == "Этап":
             self.quantity_spin.hide()
-            self.load_stages()
+            self.length_spin.show()
+            self.length_spin.setMinimum(0.01)
+
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, name FROM stages ORDER BY name")
+            rows = cursor.fetchall()
+            conn.close()
+
+            for sid, name in rows:
+                self.item_combo.addItem(name, sid)
+
+        else:  # Материал
+            self.quantity_spin.show()
+            self.length_spin.hide()  # включим только если выбран пиломатериал
+
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, name, type FROM materials ORDER BY name")
+            rows = cursor.fetchall()
+            conn.close()
+
+            for mid, name, mtype in rows:
+                self.item_combo.addItem(f"{name} ({mtype})", mid)
+
+            # реагируем на смену выбранного материала, чтобы показывать length_spin только для пиломатериалов
+            try:
+                self.item_combo.currentIndexChanged.disconnect()
+            except Exception:
+                pass
+            self.item_combo.currentIndexChanged.connect(self.on_order_material_combo_changed)
+
+            # сразу применим состояние к текущему выбранному материалу
+            self.on_order_material_combo_changed()
+
+    def on_order_material_combo_changed(self):
+        """Для типа Материал: показывает length_spin только для пиломатериалов"""
+        if self.item_type_combo.currentText() != "Материал":
+            return
+
+        material_id = self.item_combo.currentData()
+        if not material_id:
+            self.length_spin.hide()
+            return
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT type FROM materials WHERE id = ?", (material_id,))
+        r = cursor.fetchone()
+        conn.close()
+
+        mtype = r[0] if r else ""
+        if mtype == "Пиломатериал":
+            self.length_spin.show()
+            self.length_spin.setMinimum(0.01)
+            if self.length_spin.value() <= 0:
+                self.length_spin.setValue(1.0)
+        else:
+            self.length_spin.hide()
 
     def load_products(self):
         """Загружает ВСЕ изделия (базовые + составные) для заказов"""
@@ -3183,67 +3250,86 @@ class OrdersTab(QWidget):
             self.item_combo.addItem(stage_name, stage_id)
 
     def add_to_order(self):
-        """Добавление позиции в заказ: для Этапа учитываем длину, для Изделия — количество"""
+        """Добавление позиции в заказ: Изделие / Этап / Материал"""
         item_id = self.item_combo.currentData()
-        item_name = self.item_combo.currentText()
         item_type = self.item_type_combo.currentText()
 
         if not item_id:
             QMessageBox.warning(self, "Ошибка", f"Выберите {item_type.lower()}")
             return
 
+        row_count = self.order_table.rowCount()
+        self.order_table.setRowCount(row_count + 1)
+
+        self.order_table.setItem(row_count, 0, QTableWidgetItem(item_type))
+
+        # --- общая ячейка названия ---
+        name_item = QTableWidgetItem(self.item_combo.currentText())
+        name_item.setData(Qt.UserRole, int(item_id))
+        name_item.setData(Qt.UserRole + 1, item_type)
+        self.order_table.setItem(row_count, 1, name_item)
+
+        # --- ИЗДЕЛИЕ ---
         if item_type == "Изделие":
             quantity = self.quantity_spin.value()
             cost_per_unit = self._get_product_cost(item_id)
-
-            row_count = self.order_table.rowCount()
-            self.order_table.setRowCount(row_count + 1)
-
-            self.order_table.setItem(row_count, 0, QTableWidgetItem(item_type))
-
-            name_item = QTableWidgetItem(item_name)
-            name_item.setData(Qt.UserRole, item_id)
-            name_item.setData(Qt.UserRole + 1, item_type)
-            self.order_table.setItem(row_count, 1, name_item)
-
             self.order_table.setItem(row_count, 2, QTableWidgetItem(str(quantity)))
-            self.order_table.setItem(row_count, 3, QTableWidgetItem(""))  # длина пустая для изделия
+            self.order_table.setItem(row_count, 3, QTableWidgetItem(""))
             self.order_table.setItem(row_count, 4, QTableWidgetItem(f"{cost_per_unit * quantity:.2f} руб"))
 
-            delete_btn = QPushButton("Удалить")
-            delete_btn.clicked.connect(lambda: self.remove_from_order(row_count))
-            self.order_table.setCellWidget(row_count, 5, delete_btn)
-
-        else:  # Этап
-            # ИСПРАВЛЕНО: НЕ округляем длину, сохраняем точное значение
-            length_m = self.length_spin.value()  # Убрано round()
-
+        # --- ЭТАП ---
+        elif item_type == "Этап":
+            length_m = self.length_spin.value()
             if length_m <= 0:
                 QMessageBox.warning(self, "Ошибка", "Длина этапа должна быть больше 0")
+                self.order_table.removeRow(row_count)
                 return
 
             cost_total = self._compute_stage_cost(stage_id=item_id, length_m=length_m)
+            name_item.setData(Qt.UserRole + 2, float(length_m))  # длина этапа
 
-            row_count = self.order_table.rowCount()
-            self.order_table.setRowCount(row_count + 1)
-
-            self.order_table.setItem(row_count, 0, QTableWidgetItem(item_type))
-
-            name_item = QTableWidgetItem(item_name)
-            name_item.setData(Qt.UserRole, item_id)
-            name_item.setData(Qt.UserRole + 1, item_type)
-            name_item.setData(Qt.UserRole + 2, length_m)  # сохраним точную длину
-            self.order_table.setItem(row_count, 1, name_item)
-
-            self.order_table.setItem(row_count, 2, QTableWidgetItem("1"))  # количество строкой = 1 для этапа
-
-            # ИСПРАВЛЕНО: показываем точную длину с 2 знаками после запятой
+            self.order_table.setItem(row_count, 2, QTableWidgetItem("1"))
             self.order_table.setItem(row_count, 3, QTableWidgetItem(f"{length_m:.2f}"))
             self.order_table.setItem(row_count, 4, QTableWidgetItem(f"{cost_total:.2f} руб"))
 
-            delete_btn = QPushButton("Удалить")
-            delete_btn.clicked.connect(lambda: self.remove_from_order(row_count))
-            self.order_table.setCellWidget(row_count, 5, delete_btn)
+        # --- МАТЕРИАЛ ---
+        else:
+            quantity = self.quantity_spin.value()
+
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name, type, price FROM materials WHERE id = ?", (item_id,))
+            r = cursor.fetchone()
+            conn.close()
+
+            if not r:
+                QMessageBox.warning(self, "Ошибка", "Материал не найден в БД")
+                self.order_table.removeRow(row_count)
+                return
+
+            mat_name, mat_type, price = r[0], r[1], float(r[2])
+            self.order_table.item(row_count, 1).setText(mat_name)  # убираем "(тип)" из названия
+
+            if mat_type == "Пиломатериал":
+                length_per_piece = self.length_spin.value()
+                if length_per_piece <= 0:
+                    QMessageBox.warning(self, "Ошибка", "Для пиломатериала укажите длину на 1 шт (м)")
+                    self.order_table.removeRow(row_count)
+                    return
+                name_item.setData(Qt.UserRole + 2, float(length_per_piece))
+                self.order_table.setItem(row_count, 3, QTableWidgetItem(f"{length_per_piece:.2f}"))
+                cost_total = price * quantity * length_per_piece
+            else:
+                name_item.setData(Qt.UserRole + 2, 0.0)
+                self.order_table.setItem(row_count, 3, QTableWidgetItem(""))
+                cost_total = price * quantity
+
+            self.order_table.setItem(row_count, 2, QTableWidgetItem(str(quantity)))
+            self.order_table.setItem(row_count, 4, QTableWidgetItem(f"{cost_total:.2f} руб"))
+
+        delete_btn = QPushButton("Удалить")
+        delete_btn.clicked.connect(lambda: self.remove_from_order(row_count))
+        self.order_table.setCellWidget(row_count, 5, delete_btn)
 
         self._update_current_order()
         self.update_total_cost()
@@ -3478,7 +3564,7 @@ class OrdersTab(QWidget):
             print(traceback.format_exc())
 
     def _expand_order_to_requirements(self):
-        """Расширяет заказ до требований материалов с правильной логикой для этапов"""
+        """Расширяет заказ до требований материалов (изделия/этапы + отдельные материалы)"""
         total_cost = 0.0
         requirements = defaultdict(list)
 
@@ -3488,8 +3574,8 @@ class OrdersTab(QWidget):
             item_id = int(name_item.data(Qt.UserRole))
             quantity = int(self.order_table.item(row, 2).text())
 
+            # --- ИЗДЕЛИЕ ---
             if item_type == "Изделие":
-                # Логика для изделий остается без изменений
                 product_cost = self.get_product_cost(item_id)
                 total_cost += product_cost * quantity
 
@@ -3500,7 +3586,6 @@ class OrdersTab(QWidget):
                 product_name = result[0] if result else "Изделие"
                 is_composite = result[1] if result else 0
 
-                # ВАЖНО: source = реальное имя изделия
                 source_label = product_name
 
                 if is_composite:
@@ -3510,22 +3595,45 @@ class OrdersTab(QWidget):
 
                 conn.close()
 
+            # --- ОТДЕЛЬНЫЙ МАТЕРИАЛ ---
+            elif item_type == "Материал":
+                length_per_piece = float(name_item.data(Qt.UserRole + 2) or 0.0)
+
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT name, type, price FROM materials WHERE id = ?", (item_id,))
+                r = cursor.fetchone()
+                conn.close()
+
+                if not r:
+                    raise ValueError(f"Материал id={item_id} не найден в БД")
+
+                mat_name, mat_type, price = r[0], r[1], float(r[2])
+
+                if mat_type == "Пиломатериал":
+                    if length_per_piece <= 0:
+                        raise ValueError(f"Для пиломатериала '{mat_name}' не задана длина на 1 шт")
+                    for _ in range(quantity):
+                        requirements[mat_name].append((length_per_piece, mat_name))
+                    total_cost += price * quantity * length_per_piece
+                else:
+                    requirements[mat_name].append((quantity, mat_name))
+                    total_cost += price * quantity
+
+            # --- ЭТАП ---
             else:  # Этап
-                # ИСПРАВЛЕННАЯ ЛОГИКА ДЛЯ ЭТАПОВ
                 length_m = float(name_item.data(Qt.UserRole + 2)) if name_item.data(Qt.UserRole + 2) else 1.0
-                stage_cost = self._compute_stage_cost(item_id, length_m)  # Используем исправленную функцию
+                stage_cost = self._compute_stage_cost(item_id, length_m)
                 total_cost += stage_cost
 
                 conn = sqlite3.connect(self.db_path)
                 cursor = conn.cursor()
 
                 cursor.execute("SELECT name FROM stages WHERE id = ?", (item_id,))
-                stage_name = cursor.fetchone()[0]
+                stage_row = cursor.fetchone()
+                stage_name = stage_row[0] if stage_row else "Этап"
 
-                # Материалы, которые записаны прямо в этапе (не в составе изделий этапа) → должны подписываться именем этапа
                 self._expand_stage_material_requirements(cursor, item_id, length_m, requirements, stage_name)
-
-                # Материалы, которые приходят из изделий этапа → должны подписываться именем конкретного изделия
                 self._expand_stage_product_requirements(cursor, item_id, length_m, requirements, stage_name)
 
                 conn.close()
@@ -3881,24 +3989,57 @@ class OrdersTab(QWidget):
                                     "Материалов на складе недостаточно.\nСначала пополните склад.")
                 return
 
-            # 1. Составляем order_details с правильными длинами
-            # ВАЖНО: Используем индекс строки из current_order для получения правильной длины
+            # 1. Составляем order_details (Изделие/Этап/Материал)
             order_details = []
             for order_index, (item_type, item_id, quantity) in enumerate(self.current_order):
                 conn = sqlite3.connect(self.db_path)
                 cursor = conn.cursor()
+
                 if item_type == "Изделие":
                     cursor.execute("SELECT name, cost FROM products WHERE id = ?", (item_id,))
-                    name, cost = cursor.fetchone()
+                    rowp = cursor.fetchone()
+                    if not rowp:
+                        conn.close()
+                        raise ValueError(f"Изделие id={item_id} не найдено в БД")
+                    name, unit_cost = rowp
+                    cost = float(unit_cost) * int(quantity)
                     length_m = None
-                else:  # Этап
+                    order_details.append(("изделие", item_id, name, int(quantity), cost, length_m))
+
+                elif item_type == "Этап":
                     cursor.execute("SELECT name FROM stages WHERE id = ?", (item_id,))
-                    name = cursor.fetchone()[0]
-                    # ИСПРАВЛЕНИЕ: берём длину из соответствующей строки таблицы заказа
+                    rows = cursor.fetchone()
+                    if not rows:
+                        conn.close()
+                        raise ValueError(f"Этап id={item_id} не найден в БД")
+                    name = rows[0]
                     length_m = self._get_stage_length_by_order_index(order_index)
                     cost = self._compute_stage_cost(item_id, length_m)
+                    order_details.append(("этап", item_id, name, 1, cost, length_m))
+
+                else:  # Материал
+                    cursor.execute("SELECT name, type, price FROM materials WHERE id = ?", (item_id,))
+                    rowm = cursor.fetchone()
+                    if not rowm:
+                        conn.close()
+                        raise ValueError(f"Материал id={item_id} не найден в БД")
+                    name, mtype, price = rowm
+                    price = float(price)
+
+                    # длина на 1 шт хранится в order_table в UserRole+2 (в той же строке)
+                    length_per_piece = float(self.order_table.item(order_index, 1).data(Qt.UserRole + 2) or 0.0)
+
+                    if mtype == "Пиломатериал":
+                        if length_per_piece <= 0:
+                            conn.close()
+                            raise ValueError(f"Для пиломатериала '{name}' не задана длина на 1 шт")
+                        cost = price * int(quantity) * length_per_piece
+                        order_details.append(("материал", item_id, name, int(quantity), cost, length_per_piece))
+                    else:
+                        cost = price * int(quantity)
+                        order_details.append(("материал", item_id, name, int(quantity), cost, None))
+
                 conn.close()
-                order_details.append((item_type.lower(), item_id, name, quantity, cost, length_m))
 
             # 2. Расширяем до требований и получаем total_cost
             total_cost, requirements = self._expand_order_to_requirements()
@@ -3973,7 +4114,14 @@ class OrdersTab(QWidget):
 
     def _save_order_to_db(self, total_cost, order_details, instructions_text):
         """
-        Сохранение заказа с корректными длинами этапов
+        Сохранение заказа с поддержкой:
+        - изделие -> order_items.item_type = 'product'
+        - этап    -> order_items.item_type = 'stage'
+        - материал-> order_items.item_type = 'material'
+        length_meters:
+          - для этапа: длина этапа
+          - для материала-пиломатериала: длина на 1 шт
+          - иначе: NULL
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -3992,23 +4140,40 @@ class OrdersTab(QWidget):
                           (order_id, product_id, stage_id, quantity, length_meters, product_name, cost, item_type)
                         VALUES (?, ?, NULL, ?, NULL, ?, ?, ?)
                         """,
-                        (order_id, item_id, quantity, name, cost, 'product')
+                        (order_id, item_id, int(quantity), name, float(cost), 'product')
                     )
-                else:  # этап
+
+                elif item_type == 'этап':
                     cursor.execute(
                         """
                         INSERT INTO order_items
                           (order_id, product_id, stage_id, quantity, length_meters, product_name, cost, item_type)
                         VALUES (?, NULL, ?, 1, ?, ?, ?, ?)
                         """,
-                        (order_id, item_id, length_m, name, cost, 'stage')
+                        (order_id, item_id, float(length_m or 1.0), name, float(cost), 'stage')
                     )
+
+                elif item_type == 'материал':
+                    cursor.execute(
+                        """
+                        INSERT INTO order_items
+                          (order_id, product_id, stage_id, quantity, length_meters, product_name, cost, item_type)
+                        VALUES (?, NULL, NULL, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                        order_id, int(quantity), (float(length_m) if length_m else None), name, float(cost), 'material')
+                    )
+
+                else:
+                    raise ValueError(f"Неизвестный тип позиции заказа: {item_type}")
 
             conn.commit()
             return order_id
+
         except sqlite3.Error as e:
             conn.rollback()
             QMessageBox.critical(self, "Ошибка базы данных", f"Ошибка при сохранении заказа: {e}")
+            return None
         finally:
             conn.close()
 
@@ -4080,9 +4245,18 @@ class OrdersTab(QWidget):
                 if item_type == 'stage':
                     length_m = length_m or 1.0
                     line = f"- {name} (Этап, ID:{stage_id}): 1 шт, длина {length_m:.2f} м → {cost:.2f} руб"
+
+                elif item_type == 'material':
+                    if length_m is not None:
+                        line = f"- {name} (Материал): {qty} шт, длина на 1 шт {float(length_m):.2f} м → {cost:.2f} руб"
+                    else:
+                        line = f"- {name} (Материал): {qty} шт → {cost:.2f} руб"
+
                 else:
                     line = f"- {name} (Изделие): {qty} шт → {cost:.2f} руб"
+
                 story.append(Paragraph(line, normal_style))
+
             story.append(Spacer(1, 12))
 
             # Инструкции (если есть)

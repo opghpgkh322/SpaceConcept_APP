@@ -121,20 +121,24 @@ def create_database(db_path):
         existing_data = cursor.fetchall()
         cursor.execute("DROP TABLE order_items")
 
-    cursor.execute("""CREATE TABLE IF NOT EXISTS order_items (
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS order_items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         order_id INTEGER NOT NULL,
         product_id INTEGER,
         stage_id INTEGER,
+        material_id INTEGER,
         quantity INTEGER NOT NULL,
         length_meters REAL,
         product_name TEXT NOT NULL DEFAULT '',
         cost REAL NOT NULL DEFAULT 0.0,
-        item_type TEXT NOT NULL DEFAULT 'product' CHECK(item_type IN ('product', 'stage')),
+        item_type TEXT NOT NULL DEFAULT 'product' CHECK(item_type IN ('product', 'stage', 'material')),
         FOREIGN KEY (order_id) REFERENCES orders(id),
         FOREIGN KEY (product_id) REFERENCES products(id),
-        FOREIGN KEY (stage_id) REFERENCES stages(id)
-    )""")
+        FOREIGN KEY (stage_id) REFERENCES stages(id),
+        FOREIGN KEY (material_id) REFERENCES materials(id)
+    )
+    """)
 
     # Восстанавливаем данные order_items если они были
     if existing_data:
