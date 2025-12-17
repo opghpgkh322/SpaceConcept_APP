@@ -3855,20 +3855,24 @@ class OrdersTab(QWidget):
 
     def _get_stage_length_by_order_index(self, order_index):
         """
-        Получение длины этапа по индексу в current_order (соответствует строке в таблице заказа)
+        Получение длины этапа по индексу строки в таблице заказа.
+        order_index должен соответствовать row в order_table.
         """
-        stage_row_counter = 0
-        for row in range(self.order_table.rowCount()):
-            if self.order_table.item(row, 0).text() == "Этап":  # Проверяем, что это этап
-                if stage_row_counter == order_index:  # Нашли нужную строку этапа
-                    length_text = self.order_table.item(row, 3).text() or "1.0"
-                    try:
-                        return float(length_text)
-                    except:
-                        return 1.0
-                stage_row_counter += 1
-        return 1.0  # Значение по умолчанию
+        try:
+            if order_index < 0 or order_index >= self.order_table.rowCount():
+                return 1.0
 
+            if self.order_table.item(order_index, 0).text() != "Этап":
+                return 1.0
+
+            length_text = (self.order_table.item(order_index, 3).text() or "").strip()
+            if not length_text:
+                return 1.0
+
+            length_val = float(length_text)
+            return length_val if length_val > 0 else 1.0
+        except Exception:
+            return 1.0
 
     def _update_warehouse(self, updated_data):
         conn = sqlite3.connect(self.db_path)
@@ -4008,7 +4012,12 @@ class OrdersTab(QWidget):
             # Инструкции (если есть)
             if instructions_text:
                 story.append(Paragraph("Подробные инструкции:", heading_style))
-                formatted_instructions = instructions_text.replace('\n', '<br/>')
+                # Важно: Paragraph понимает <br/>, а также простую разметку <b>/<u>
+                formatted_instructions = instructions_text.replace("\n", "<br/>")
+
+                # Чуть больше “воздуха” между логическими блоками
+                formatted_instructions = formatted_instructions.replace("<br/><br/>", "<br/>&nbsp;<br/>")
+
                 story.append(Paragraph(formatted_instructions, normal_style))
 
             doc.build(story)
@@ -4037,7 +4046,8 @@ class OrdersTab(QWidget):
 
         for name, qty, cost, item_type, length_m, stage_id in items:
             if item_type == 'stage':
-                length_m = length_m or 1.0
+                length_m = 1.0 if (length_m is None or length_m <= 0) else float(length_m)
+
                 lines.append(f"Этап \"{name}\" (ID:{stage_id}): длина {length_m:.2f} м → {cost:.2f} руб")
             else:
                 lines.append(f"Изделие \"{name}\": {qty} шт → {cost:.2f} руб")
@@ -4051,21 +4061,20 @@ class OrdersTab(QWidget):
 
     def _generate_realistic_cutting_plan(self, requirements):
         """
-        Формирует полный список затраченных материалов и инструкции по распилу,
-        но исключает из инструкций для распила материалы 'Трос М10' и 'Трос М12'.
+        Формирует:
+        1) Затраченные материалы (корректно: пиломатериал в метрах, метиз в штуках)
+        2) План распила ТОЛЬКО для пиломатериалов (метизы исключаем)
         """
-        import math
+        from collections import defaultdict
         from cutting_optimizer import CuttingOptimizer
 
-        # 1. Список всех материалов
-        material_lines = []
-        for material, reqs in requirements.items():
-            total_qty = sum(math.ceil(r[0]) if isinstance(r, tuple) else math.ceil(r) for r in reqs)
-            material_lines.append(f"{material}: {total_qty}")
-
-        # 2. Загружаем склад и типы материалов сразу в оптимизатор
+        # 0) Получаем типы материалов из БД (Пиломатериал/Метиз)
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
+        cursor.execute("SELECT name, type FROM materials")
+        material_types = {name: mtype for name, mtype in cursor.fetchall()}
+
+        # Склад
         cursor.execute("""
             SELECT m.name, w.length, w.quantity
             FROM warehouse w
@@ -4075,38 +4084,72 @@ class OrdersTab(QWidget):
         stock_items = [(name, length, qty) for name, length, qty in cursor.fetchall()]
         conn.close()
 
-        # 3. Вызываем оптимизатор для всех материалов (кроме исключаемых)
-        optimizer_requirements = {
-            mat: reqs
-            for mat, reqs in requirements.items()
-            if mat not in ('Трос М10', 'Трос М12')
-        }
+        # 1) Затраченные материалы (как в расчёте: суммируем qty по требованиям)
+        material_lines = []
+        for material, reqs in requirements.items():
+            mtype = material_types.get(material, "")
+
+            # reqs = [(qty_or_length, source_name), ...]
+            total = 0.0
+            for qty, _src in reqs:
+                total += float(qty)
+
+            if mtype == "Пиломатериал":
+                material_lines.append(f"{material}: {total:.2f} м")
+            else:
+                # метизы и прочее — штуки
+                material_lines.append(f"{material}: {int(round(total))} шт")
+
+        # 2) Готовим требования для оптимизатора: только пиломатериалы (и сразу исключаем тросы)
+        optimizer_requirements = {}
+        for material, reqs in requirements.items():
+            if material in ("Трос М10", "Трос М12"):
+                continue
+            if material_types.get(material) != "Пиломатериал":
+                continue
+            optimizer_requirements[material] = reqs
+
         result = CuttingOptimizer.optimize_cutting(
             requirements=optimizer_requirements,
             stock_items=stock_items,
             db_path=self.db_path
         )
-        cutting_instructions = result.get('cutting_instructions', {})
+        cutting_instructions = result.get("cutting_instructions", {})  # как у тебя сейчас
 
-        # 4. Составляем итоговые строки
-        lines = ['Затраченные материалы:']
+        # 3) Итоговые строки + форматирование (пустая строка после заголовка)
+        lines = ["Затраченные материалы:", ""]
         lines.extend(material_lines)
 
-        # 5. Добавляем инструкции по распилу для всех, кроме тросов
-        #    при этом сохраняем порядок и формат старой реализации
+        # 4) План распила: только пиломатериалы, названия материалов подчёркнуты/выделены
         if cutting_instructions:
-            lines.append('')
-            lines.append('План распила материалов:')
+            lines.append("")
+            lines.append("План распила материалов:")
+
             for material, instr_list in cutting_instructions.items():
-                # Пропускаем тросы, если всё же остались
-                if material in ('Трос М10', 'Трос М12'):
-                    continue
                 if not instr_list:
                     continue
-                lines.append(f"{material}:")
+
+                # подчёркивание/выделение имени пиломатериала (ReportLab Paragraph это переварит)
+                lines.append("")
+                lines.append(f"<u><b>{material}</b></u>:")
+
+                # Доп. разделение “по изделиям” (чтобы визуально было легче)
+                by_product = defaultdict(list)
+                for qty, src in optimizer_requirements.get(material, []):
+                    by_product[src].append(float(qty))
+
+                if by_product:
+                    lines.append("  Разбивка по изделиям:")
+                    for prod in sorted(by_product.keys()):
+                        pieces = by_product[prod]
+                        lines.append(f"    - '{prod}': {len(pieces)} отрезков, всего {sum(pieces):.2f} м")
+                    lines.append("")
+
+                # Сами блоки распила
                 for block in instr_list:
-                    for l in block.strip().split('\n'):
+                    for l in block.strip().split("\n"):
                         lines.append(f"  {l}")
+                    lines.append("")  # разделитель между “досками/блоками”
 
         return lines
 
