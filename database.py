@@ -96,6 +96,7 @@ def create_database(db_path):
         quantity INTEGER NOT NULL,
         length REAL,
         part TEXT NOT NULL DEFAULT 'meter' CHECK(part IN ('start','meter','end')),
+        merge_to_single INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (stage_id) REFERENCES stages(id),
         FOREIGN KEY (material_id) REFERENCES materials(id)
     )""")
@@ -153,7 +154,7 @@ def create_database(db_path):
         check_table_structure(cursor, 'orders', {'pdf_filename': 'TEXT'})
         check_table_structure(cursor, 'stages', {'category': 'TEXT DEFAULT \'Статика\''})
         check_table_structure(cursor, 'stage_products', {'part': 'TEXT NOT NULL DEFAULT \'meter\''})
-        check_table_structure(cursor, 'stage_materials', {'part': 'TEXT NOT NULL DEFAULT \'meter\''})
+        check_table_structure(cursor, 'stage_materials', {'part': 'TEXT NOT NULL DEFAULT \'meter\'', 'merge_to_single': "INTEGER NOT NULL DEFAULT 0"})
         check_table_structure(cursor, 'order_items', {'length_meters': 'REAL'})
         check_table_structure(cursor, 'products', {'is_composite': 'BOOLEAN NOT NULL DEFAULT 0'})
         conn.commit()

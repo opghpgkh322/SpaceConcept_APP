@@ -51,9 +51,9 @@ if __name__ == "__main__":
     else:
         need_init_db = True
 
-    if need_init_db:
-        create_database(dbpath)
-        add_stage_category_column(dbpath)
+    # Всегда прогоняем миграции/структуру после скачивания (и после создания новой БД тоже)
+    create_database(dbpath)
+    add_stage_category_column(dbpath)
 
     window = MainWindow(dbpath)
     window.show()
