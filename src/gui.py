@@ -2491,8 +2491,8 @@ class WarehouseTab(QWidget):
             return
         try:
             download_db(token, remote_path, self.db_path)
-            if self.mainwindow and hasattr(self.mainwindow, "reloadAllTabs"):
-                self.mainwindow.reloadAllTabs()
+            if self.main_window and hasattr(self.main_window, "reloadAllTabs"):
+                self.main_window.reloadAllTabs()
             QMessageBox.information(self, "Готово", "Данные обновлены из облака")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка сети", str(e))
@@ -4922,74 +4922,100 @@ class OrdersTab(QWidget):
             conn.close()
 
     def show_order_details(self, row, column):
-        """Показывает детали заказа"""
-        if row < 0 or not self.history_table.item(row, 0):
+        """Показывает детали заказа (безопасная версия)"""
+        if row < 0:
             return
 
-        order_id = self.history_table.item(row, 0).text()
+        # Импорт таймера локально, чтобы не искать начало файла
+        from PyQt5.QtCore import QTimer
 
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
-        # Получаем детали заказа
-        cursor.execute("""
-            SELECT product_name, quantity, cost, item_type, length_meters 
-            FROM order_items 
-            WHERE order_id = ?
-        """, (order_id,))
-        items = cursor.fetchall()
-
-        # Получаем общую информацию о заказе
-        cursor.execute("""
-            SELECT order_date, total_cost, instructions 
-            FROM orders 
-            WHERE id = ?
-        """, (order_id,))
-        order_info = cursor.fetchone()
-        conn.close()
-
-        if not order_info:
-            QMessageBox.warning(self, "Ошибка", "Заказ не найден")
+        # Получаем ID заказа из первой колонки
+        item = self.history_table.item(row, 0)
+        if not item:
             return
+        order_id = item.text()
 
-        order_date, total_cost, instructions = order_info
+        def _open_dialog():
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
 
-        # Создаем диалог с деталями
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Детали заказа №{order_id}")
-        dialog.setMinimumSize(700, 500)
+                # Получаем детали заказа
+                # Используем try для защиты от старых баз без колонки item_type
+                try:
+                    cursor.execute("""
+                        SELECT product_name, quantity, cost, item_type, length_meters 
+                        FROM order_items 
+                        WHERE order_id = ?
+                    """, (order_id,))
+                except sqlite3.OperationalError:
+                    # Фолбэк для старой структуры БД (если нет item_type)
+                    cursor.execute("""
+                        SELECT product_name, quantity, cost, 'product', 0
+                        FROM order_items 
+                        WHERE order_id = ?
+                    """, (order_id,))
 
-        layout = QVBoxLayout()
+                items = cursor.fetchall()
 
-        # Основная информация
-        info_text = f"Заказ от {order_date}\n"
-        info_text += f"Общая стоимость: {total_cost:.2f} руб\n\n"
-        info_text += "Состав заказа:\n"
+                # Получаем общую информацию
+                cursor.execute("SELECT order_date, total_cost, instructions FROM orders WHERE id = ?", (order_id,))
+                order_info = cursor.fetchone()
+                conn.close()
 
-        for name, quantity, cost, item_type, length_m in items:
-            if item_type == 'stage':
-                length_m = length_m or 1.0
-                info_text += f"- {name} (Этап): длина {length_m:.2f} м → {cost:.2f} руб\n"
-            else:
-                info_text += f"- {name} (Изделие): {quantity} шт → {cost:.2f} руб\n"
+                if not order_info:
+                    return
 
-        # Если есть подробные инструкции
-        if instructions:
-            info_text += f"\n{instructions}"
+                order_date, total_cost, instructions = order_info
 
-        # Создаем текстовое поле с прокруткой
-        text_widget = QTextEdit()
-        text_widget.setPlainText(info_text)
-        text_widget.setReadOnly(True)
-        layout.addWidget(text_widget)
+                # Создаем диалог
+                dialog = QDialog(self)
+                dialog.setWindowTitle(f"Детали заказа №{order_id}")
+                dialog.setMinimumSize(600, 450)
+                layout = QVBoxLayout()
 
-        # Кнопка закрытия
-        close_btn = QPushButton("Закрыть")
-        close_btn.clicked.connect(dialog.accept)
-        layout.addWidget(close_btn)
+                # Текст
+                info_text = f"Заказ от {order_date}\n"
+                info_text += f"Общая стоимость: {total_cost:.2f} руб\n\n"
+                info_text += "Состав заказа:\n"
 
-        dialog.setLayout(layout)
-        dialog.exec_()
+                for name, quantity, cost, item_type, length_m in items:
+                    # Защита от None
+                    length_m = length_m or 0.0
+                    item_type = item_type or 'product'
+
+                    if item_type == 'stage':
+                        info_text += f"- {name} (Этап): {length_m:.2f} м → {cost:.2f} руб\n"
+                    elif item_type == 'material':
+                        # Для материалов показываем длину, если она есть (пиломатериалы)
+                        len_str = f", {length_m:.2f} м" if length_m > 0 else ""
+                        info_text += f"- {name} (Материал): {quantity} шт{len_str} → {cost:.2f} руб\n"
+                    else:
+                        info_text += f"- {name} (Изделие): {quantity} шт → {cost:.2f} руб\n"
+
+                if instructions:
+                    info_text += f"\nИнструкции:\n{instructions}"
+
+                text_widget = QTextEdit()
+                text_widget.setPlainText(info_text)
+                text_widget.setReadOnly(True)
+                layout.addWidget(text_widget)
+
+                close_btn = QPushButton("Закрыть")
+                close_btn.clicked.connect(dialog.accept)
+                layout.addWidget(close_btn)
+
+                dialog.setLayout(layout)
+                dialog.exec_()
+
+            except Exception as e:
+                # Если все равно ошибка — покажем её, но не уроним приложение
+                print(f"Error opening details: {e}")
+                QMessageBox.critical(self, "Ошибка", f"Не удалось открыть детали заказа:\n{e}")
+
+        # Самое важное исправление: запускаем диалог через таймер,
+        # чтобы выйти из текущего события отрисовки клика
+        QTimer.singleShot(0, _open_dialog)
 
     # ИСПРАВЛЕНИЕ: Новые методы для работы с PDF
     def open_selected_pdf(self):
