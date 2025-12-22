@@ -2666,114 +2666,155 @@ class OrdersTab(QWidget):
         self.load_order_history()
 
     def init_ui(self):
+        # Основной вертикальный лайаут всего окна
         main_layout = QVBoxLayout()
 
-        order_group = QGroupBox("Создать заказ")
-        order_layout = QVBoxLayout()
+        # --- ВЕРХНЯЯ ЧАСТЬ: СОЗДАНИЕ И УПРАВЛЕНИЕ ЗАКАЗОМ ---
+        # Делим на левую (панель) и правую (таблица) части
+        top_splitter_layout = QHBoxLayout()
 
-        self.order_table = QTableWidget()
-        self.order_table.setColumnCount(6)
-        self.order_table.setHorizontalHeaderLabels(
-            ["Тип", "Название", "Количество", "Длина (м)", "Себестоимость", "Действия"])
-        self.order_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.order_table.cellDoubleClicked.connect(self.on_cell_double_clicked)
-        order_layout.addWidget(self.order_table)
+        # 1. ЛЕВАЯ ПАНЕЛЬ (Конфигурация)
+        control_panel_widget = QWidget()
+        control_panel_widget.setFixedWidth(320)  # Чуть уменьшили ширину панели
+        control_panel_layout = QVBoxLayout(control_panel_widget)
+        control_panel_layout.setContentsMargins(0, 0, 0, 0)
 
-        form_layout = QFormLayout()
+        # Группа: Добавление позиции
+        add_group = QGroupBox("Добавление позиции")
+        add_layout = QFormLayout()
 
         self.item_type_combo = QComboBox()
         self.item_type_combo.addItems(["Изделие", "Этап", "Материал"])
         self.item_type_combo.currentTextChanged.connect(self.on_item_type_changed)
-        form_layout.addRow(QLabel("Тип:"), self.item_type_combo)
+        add_layout.addRow("Тип:", self.item_type_combo)
 
         self.item_combo = QComboBox()
-        form_layout.addRow(QLabel("Выберите:"), self.item_combo)
+        add_layout.addRow("Выберите:", self.item_combo)
 
         self.quantity_spin = QSpinBox()
-        self.quantity_spin.setMinimum(1)
-        self.quantity_spin.setMaximum(999)
+        self.quantity_spin.setRange(1, 999)
         self.quantity_spin.setValue(1)
-        form_layout.addRow(QLabel("Количество:"), self.quantity_spin)
+        add_layout.addRow("Количество:", self.quantity_spin)
 
         self.length_spin = QDoubleSpinBox()
         self.length_spin.setDecimals(2)
-        self.length_spin.setMinimum(0.01)
-        self.length_spin.setMaximum(9999.0)
+        self.length_spin.setRange(0.01, 9999.0)
         self.length_spin.setSingleStep(0.10)
-        form_layout.addRow(QLabel("Длина (м):"), self.length_spin)
-        self.length_spin.hide()  # по умолчанию скрыто (для Изделия)
+        add_layout.addRow("Длина (м):", self.length_spin)
+        self.length_spin.hide()
 
+        # Кнопки добавления и очистки ВМЕСТЕ
         self.add_to_order_btn = QPushButton("Добавить в заказ")
         self.add_to_order_btn.clicked.connect(self.add_to_order)
-        form_layout.addRow(self.add_to_order_btn)
-
-        order_layout.addLayout(form_layout)
-
-        btn_layout = QHBoxLayout()
-        self.calculate_btn = QPushButton("Рассчитать заказ")
-        self.calculate_btn.clicked.connect(self.calculate_order)
-        btn_layout.addWidget(self.calculate_btn)
-
-        self.confirm_btn = QPushButton("Подтвердить заказ")
-        self.confirm_btn.clicked.connect(self.confirm_order)
-        btn_layout.addWidget(self.confirm_btn)
-        self.confirm_btn.setEnabled(False)
-        self.confirm_btn.setToolTip("Сначала нажмите «Рассчитать заказ» и убедитесь, что материалов достаточно.")
+        add_layout.addRow(self.add_to_order_btn)
 
         self.clear_btn = QPushButton("Очистить заказ")
         self.clear_btn.clicked.connect(self.clear_order)
-        btn_layout.addWidget(self.clear_btn)
+        add_layout.addRow(self.clear_btn)
 
-        order_layout.addLayout(btn_layout)
+        add_group.setLayout(add_layout)
+        control_panel_layout.addWidget(add_group)
 
+        # Группа: Действия с заказом
+        actions_group = QGroupBox("Действия с заказом")
+        actions_layout = QVBoxLayout()
+
+        # Подгруппа: Основные действия
+        row1 = QHBoxLayout()
+        self.calculate_btn = QPushButton("Рассчитать")
+        self.calculate_btn.clicked.connect(self.calculate_order)
+        row1.addWidget(self.calculate_btn)
+
+        self.confirm_btn = QPushButton("Подтвердить")
+        self.confirm_btn.clicked.connect(self.confirm_order)
+        self.confirm_btn.setEnabled(False)
+        row1.addWidget(self.confirm_btn)
+        actions_layout.addLayout(row1)
+
+        # Кнопка троса
+        self.calculate_rope_btn = QPushButton("Рассчитать и добавить\nстраховочный трос")
+        self.calculate_rope_btn.clicked.connect(self.calculate_safety_rope)
+        actions_layout.addWidget(self.calculate_rope_btn)
+
+        # Подгруппа: Файл
+        file_row = QHBoxLayout()
+        self.import_txt_btn = QPushButton("Импорт .txt")
+        self.import_txt_btn.clicked.connect(self.import_order_from_txt)
+        file_row.addWidget(self.import_txt_btn)
+
+        self.export_txt_btn = QPushButton("Экспорт .txt")
+        self.export_txt_btn.clicked.connect(self.export_order_to_txt)
+        file_row.addWidget(self.export_txt_btn)
+        actions_layout.addLayout(file_row)
+
+        actions_group.setLayout(actions_layout)
+        control_panel_layout.addWidget(actions_group)
+
+        # Итоговая стоимость (уменьшен шрифт)
+        self.total_cost_label = QLabel("Общая себестоимость:\n0.00 руб")
+        # font-size: 10pt (было 14pt)
+        self.total_cost_label.setStyleSheet("font-weight: bold; font-size: 10pt; color: #2E8B57;")
+        self.total_cost_label.setAlignment(Qt.AlignCenter)
+        control_panel_layout.addWidget(self.total_cost_label)
+
+        control_panel_layout.addStretch()
+
+        # 2. ПРАВАЯ ЧАСТЬ (Таблица)
+        right_panel_layout = QVBoxLayout()
+        self.order_table = QTableWidget()
+        self.order_table.setColumnCount(6)
+        self.order_table.setHorizontalHeaderLabels(
+            ["Тип", "Название", "Кол-во", "Длина (м)", "Себестоимость", "Действия"])
+        self.order_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.order_table.cellDoubleClicked.connect(self.on_cell_double_clicked)
+        right_panel_layout.addWidget(self.order_table)
+
+        top_splitter_layout.addWidget(control_panel_widget)
+        top_splitter_layout.addLayout(right_panel_layout, 1)
+
+        # Stretch=1 для верхней части (было 2)
+        main_layout.addLayout(top_splitter_layout, stretch=1)
+
+        # --- НИЖНЯЯ ЧАСТЬ: СООБЩЕНИЯ И ИСТОРИЯ ---
+        bottom_splitter_layout = QHBoxLayout()
+
+        # Окно сообщений
+        msg_group = QGroupBox("Окно сообщений")
+        msg_layout = QVBoxLayout()
         self.instructions_text = QTextEdit()
         self.instructions_text.setReadOnly(True)
-        self.instructions_text.setMinimumHeight(150)
-        order_layout.addWidget(QLabel("Окно сообщений:"))
-        order_layout.addWidget(self.instructions_text)
+        msg_layout.addWidget(self.instructions_text)
+        msg_group.setLayout(msg_layout)
 
-        self.total_cost_label = QLabel("Общая себестоимость: 0.00 руб")
-        self.total_cost_label.setStyleSheet("font-weight: bold; font-size: 12pt;")
-        order_layout.addWidget(self.total_cost_label)
+        bottom_splitter_layout.addWidget(msg_group, stretch=1)
 
-        order_group.setLayout(order_layout)
-        main_layout.addWidget(order_group)
+        # История заказов
+        hist_group = QGroupBox("История заказов")
+        hist_layout = QVBoxLayout()
 
-        history_group = QGroupBox("История заказов")
-        history_layout = QVBoxLayout()
         self.history_table = QTableWidget()
         self.history_table.setColumnCount(4)
         self.history_table.setHorizontalHeaderLabels(["ID", "Дата", "Позиций", "Сумма"])
         self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.history_table.cellDoubleClicked.connect(self.show_order_details)
-        history_layout.addWidget(self.history_table)
+        hist_layout.addWidget(self.history_table)
 
-        history_buttons_layout = QHBoxLayout()
+        hist_btns = QHBoxLayout()
         self.open_pdf_btn = QPushButton("Открыть PDF")
         self.open_pdf_btn.clicked.connect(self.open_selected_pdf)
-        history_buttons_layout.addWidget(self.open_pdf_btn)
+        hist_btns.addWidget(self.open_pdf_btn)
 
         self.refresh_history_btn = QPushButton("Обновить историю")
         self.refresh_history_btn.clicked.connect(self.load_order_history)
-        history_buttons_layout.addWidget(self.refresh_history_btn)
-        history_buttons_layout.addStretch()
-        history_layout.addLayout(history_buttons_layout)
+        hist_btns.addWidget(self.refresh_history_btn)
 
-        history_group.setLayout(history_layout)
-        main_layout.addWidget(history_group)
+        hist_layout.addLayout(hist_btns)
+        hist_group.setLayout(hist_layout)
 
-        # ДОБАВЛЯЕМ КНОПКУ РАСЧЕТА СТРАХОВОЧНОГО ТРОСА
-        self.calculate_rope_btn = QPushButton("Рассчитать и добавить страховочный трос к заказу")
-        self.calculate_rope_btn.clicked.connect(self.calculate_safety_rope)
-        btn_layout.addWidget(self.calculate_rope_btn)
+        bottom_splitter_layout.addWidget(hist_group, stretch=1)
 
-        self.import_txt_btn = QPushButton("Импорт из .txt")
-        self.import_txt_btn.clicked.connect(self.import_order_from_txt)
-        btn_layout.addWidget(self.import_txt_btn)
-
-        self.export_txt_btn = QPushButton("Экспорт в .txt")
-        self.export_txt_btn.clicked.connect(self.export_order_to_txt)
-        btn_layout.addWidget(self.export_txt_btn)
+        # Stretch=1 для нижней части (теперь они равны, 50/50)
+        main_layout.addLayout(bottom_splitter_layout, stretch=1)
 
         self.setLayout(main_layout)
 
