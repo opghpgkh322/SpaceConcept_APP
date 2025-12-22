@@ -146,10 +146,7 @@ class RoutesPlanningDialog(QDialog):
         auto_btn.setToolTip("Автоматически расставить этапы по трассам без конфликтов")
         btn_layout.addWidget(auto_btn)
 
-        preview_btn = QPushButton("Предварительный просмотр")
-        preview_btn.clicked.connect(self.show_preview)
-        preview_btn.setToolTip("Показать, как будут рассчитаны трассы троса")
-        btn_layout.addWidget(preview_btn)
+
 
         btn_layout.addStretch()
 
@@ -224,82 +221,6 @@ class RoutesPlanningDialog(QDialog):
         # Запускаем валидацию
         self.validate_positions()
 
-    def show_preview(self):
-        """Исправленный предварительный просмотр расчета трасс"""
-        # Проверяем позиции
-        self.validate_positions()
-        if not self.ok_btn.isEnabled():
-            QMessageBox.warning(self, "Ошибка", "Устраните конфликты позиций перед просмотром")
-            return
-
-        # Получаем трассы
-        routes = self.get_routes()
-
-        # Общая статистика
-        total_stages = len(self.stages)
-        static_count = sum(1 for s in self.stages if s['category'] == "Статика")
-        dynamic_count = total_stages - static_count
-
-        preview = f"🔍 Предварительный расчет трасс:\n"
-        preview += f"Всего этапов: {total_stages} (Статика: {static_count}, Динамика/Зип: {dynamic_count})\n"
-        preview += f"Трасс страховочного троса: {len(routes)}\n\n"
-
-        total_rope = 0.0
-        total_clamps = 0
-
-        for idx, route in enumerate(routes, 1):
-            preview += f"=== Трасса {idx} ===\n"
-            preview += f"Статических этапов: {len(route)}\n"
-
-            # Восстанавливаем полную трассу с динамическими этапами
-            full_route = []
-            for row in range(len(self.stages)):
-                route_widget = self.planning_table.cellWidget(row, 3)
-                position_widget = self.planning_table.cellWidget(row, 4)
-                stage = self.stages[row]
-
-                if route_widget and position_widget:
-                    if route_widget.value() == idx:
-                        full_route.append((position_widget.value(), stage))
-
-            # Сортируем по позиции и разбиваем на сегменты
-            full_route.sort(key=lambda x: x[0])
-            segments = []
-            current_segment = None
-
-            for pos, stage in full_route:
-                stage_type = 'static' if stage['category'] == 'Статика' else 'dynamic'
-
-                if current_segment is None or current_segment['type'] != stage_type:
-                    current_segment = {'type': stage_type, 'stages': [stage]}
-                    segments.append(current_segment)
-                else:
-                    current_segment['stages'].append(stage)
-
-            # Расчет для этой трассы - только статические сегменты
-            route_rope = 0.0
-            route_clamps = 0
-
-            for segment in segments:
-                if segment['type'] == 'static':
-                    N = len(segment['stages'])
-                    L = sum(s['length'] for s in segment['stages'])
-                    rope = 5 + 5 * N + L
-                    clamps = 6 + 6 * N
-                    route_rope += rope
-                    route_clamps += clamps
-                    preview += f" Статический сегмент: {N} этапов, {L:.2f}м → "
-                    preview += f"Трос: {rope:.2f}м, Зажимы: {clamps}шт\n"
-                elif segment['type'] == 'dynamic':
-                    preview += f" Динамический сегмент: игнорируется (разрывает трассу)\n"
-
-            total_rope += route_rope
-            total_clamps += route_clamps
-            preview += f"Итого по трассе {idx}: {route_rope:.2f}м троса, {route_clamps} зажимов\n\n"
-
-        preview += f"📊 ОБЩИЙ ИТОГ: {total_rope:.2f}м троса М12, {total_clamps} зажимов М12"
-
-        QMessageBox.information(self, "Предварительный расчет", preview)
 
     def get_routes(self):
         """Возвращает список трасс с этапами (включая динамические для правильного разбиения)"""
@@ -3109,42 +3030,57 @@ class OrdersTab(QWidget):
 
     def calculate_rope_materials(self, routes):
         """
-        Исправленный расчет материалов страховочного троса.
-        Теперь правильно работает с полными трассами, включая динамические этапы.
+        Рассчитывает материалы для страховочного троса по новой логике "узлов".
         """
         total_rope = 0.0
         total_clamps = 0
+        total_protectors = 0
+        total_nails = 0
 
+        # Проходим по каждой отдельной трассе
         for route in routes:
-            if not route:  # Пустая трасса
-                continue
+            # 1. Считаем общую длину статических этапов в трассе
+            total_static_length = sum(stage['length'] for stage in route if stage['category'] == 'Статика')
+            total_rope += total_static_length
 
-            # Разбиваем трассу на сегменты (как в show_preview)
-            segments = []
-            current_segment = None
+            # 2. Определяем, сколько узлов (деревьев) требуют крепления
+            active_nodes_count = 0
 
-            for stage in route:
-                stage_type = 'static' if stage['category'] == 'Статика' else 'dynamic'
+            # В трассе N этапов и N+1 узел (дерево)
+            num_nodes = len(route) + 1
 
-                if current_segment is None or current_segment['type'] != stage_type:
-                    # Начинаем новый сегмент
-                    current_segment = {'type': stage_type, 'stages': [stage]}
-                    segments.append(current_segment)
-                else:
-                    # Продолжаем текущий сегмент
-                    current_segment['stages'].append(stage)
+            for i in range(num_nodes):
+                # Проверяем узел `i`. Индексы этапов в route: 0, 1, ..., N-1
 
-            # Рассчитываем трос только для статических сегментов
-            for segment in segments:
-                if segment['type'] == 'static':
-                    N = len(segment['stages'])
-                    L = sum(stage['length'] for stage in segment['stages'])
-                    rope = 5 + 5 * N + L
-                    clamps = 6 + 6 * N
-                    total_rope += rope
-                    total_clamps += clamps
+                # Узел `i` находится между этапами `i-1` и `i`
+                stage_before = route[i - 1] if i > 0 else None
+                stage_after = route[i] if i < len(route) else None
 
-        return total_rope, total_clamps
+                is_active = False
+
+                # Если узел является началом или концом статического этапа
+                if stage_before and stage_before['category'] == 'Статика':
+                    is_active = True
+                if stage_after and stage_after['category'] == 'Статика':
+                    is_active = True
+
+                if is_active:
+                    active_nodes_count += 1
+
+            # 3. Рассчитываем материалы на основе "активных" узлов
+            # Трос: 3 метра на каждый активный узел
+            total_rope += active_nodes_count * 3.0
+
+            # Зажимы: 6 шт на каждый активный узел
+            total_clamps += active_nodes_count * 6
+
+            # Протекторы: 3 шт на каждый активный узел
+            total_protectors += active_nodes_count * 3
+
+            # Гвозди: 6 шт на каждый активный узел
+            total_nails += active_nodes_count * 6
+
+        return total_rope, total_clamps, total_protectors, total_nails
 
     def calculate_safety_rope(self):
         """Рассчитывает и добавляет страховочный трос в заказ"""
@@ -3152,37 +3088,33 @@ class OrdersTab(QWidget):
         stages_in_order = []
         for row in range(self.order_table.rowCount()):
             if self.order_table.item(row, 0) and self.order_table.item(row, 0).text() == "Этап":
-                stage_id = self.order_table.item(row, 1).data(Qt.UserRole) if self.order_table.item(row, 1) else None
-                stage_name = self.order_table.item(row, 1).text() if self.order_table.item(row,
-                                                                                           1) else "Неизвестный этап"
-                length_text = self.order_table.item(row, 3).text() if self.order_table.item(row, 3) else "0"
-
+                stage_id = int(self.order_table.item(row, 1).data(Qt.UserRole))
+                stage_name = self.order_table.item(row, 1).text()
+                length_text = self.order_table.item(row, 3).text()
                 try:
                     length = float(length_text)
-                except (ValueError, AttributeError):
+                except ValueError:
                     length = 0.0
 
-                if stage_id:
-                    # Получаем категорию этапа
-                    conn = sqlite3.connect(self.db_path)
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT category FROM stages WHERE id = ?", (stage_id,))
-                    result = cursor.fetchone()
-                    category = result[0] if result else "Статика"
-                    conn.close()
+                # Получаем категорию
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT category FROM stages WHERE id = ?", (stage_id,))
+                result = cursor.fetchone()
+                category = result[0] if result else "Статика"
+                conn.close()
 
-                    stages_in_order.append({
-                        'id': stage_id,
-                        'name': stage_name,
-                        'length': length,
-                        'category': category
-                    })
+                stages_in_order.append({
+                    'id': stage_id,
+                    'name': stage_name,
+                    'length': length,
+                    'category': category
+                })
 
         if not stages_in_order:
             QMessageBox.warning(self, "Ошибка", "В заказе нет этапов для расчета страховочного троса")
             return
 
-        # Проверяем, есть ли статические этапы
         static_stages = [s for s in stages_in_order if s['category'] == 'Статика']
         if not static_stages:
             QMessageBox.information(self, "Информация",
@@ -3193,10 +3125,8 @@ class OrdersTab(QWidget):
         dynamic_count = len(stages_in_order) - len(static_stages)
         info_msg = f"В заказе:\n• Статических этапов: {len(static_stages)}\n• Динамических/Зип: {dynamic_count}"
 
-        # Открываем диалог планирования трасс
         dialog = RoutesPlanningDialog(stages_in_order, self)
 
-        # Показываем информацию перед планированием
         QMessageBox.information(self, "Планирование трасс",
                                 f"{info_msg}\n\nСейчас откроется окно планирования трасс.\n"
                                 "Динамические этапы разрывают страховочный трос!")
@@ -3204,81 +3134,121 @@ class OrdersTab(QWidget):
         if dialog.exec_() == QDialog.Accepted:
             routes = dialog.get_routes()
             if routes:
-                total_rope, total_clamps = self.calculate_rope_materials(routes)
-                self.add_rope_to_order(total_rope, total_clamps)
+                # !!! ИЗМЕНЕНИЕ ЗДЕСЬ !!!
+                t_rope, t_clamps, t_prot, t_nails = self.calculate_rope_materials(routes)
 
-                # Показываем детальный отчет
+                self.add_rope_to_order(t_rope, t_clamps, t_prot, t_nails)
+
                 routes_info = f"Создано трасс троса: {len(routes)}\n"
                 for i, route in enumerate(routes, 1):
                     routes_info += f"Трасса {i}: {len(route)} этапов\n"
 
                 QMessageBox.information(self, "Расчет завершен",
                                         f"{routes_info}\nДобавлено:\n"
-                                        f"• Трос М12: {total_rope:.2f} м\n"
-                                        f"• Зажимы М12: {total_clamps} шт")
+                                        f"• Трос М12: {t_rope:.2f} м\n"
+                                        f"• Зажимы М12: {t_clamps} шт\n"
+                                        f"• Протектор (2шт): {t_prot} шт\n"
+                                        f"• Гвозди 100мм: {t_nails} шт")
             else:
                 QMessageBox.warning(self, "Ошибка", "Не удалось создать трассы для страховочного троса")
 
-    def add_rope_to_order(self, rope_length, clamps_count):
-        """Исправленный метод добавления материалов страховочного троса в заказ"""
+    def add_rope_to_order(self, rope_length, clamps_count, protectors_count, nails_count):
+        """Исправленный метод добавления материалов страховочного троса"""
         try:
-            # Получаем ID материалов из БД
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            cursor.execute("SELECT id, price FROM materials WHERE name = 'Трос М12'")
-            rope_result = cursor.fetchone()
-            cursor.execute("SELECT id, price FROM materials WHERE name = 'Зажим М12'")
-            clamp_result = cursor.fetchone()
-            conn.close()
 
-            if not rope_result or not clamp_result:
-                QMessageBox.warning(self, "Ошибка",
-                                    "Материалы 'Трос М12' или 'Зажим М12' не найдены в базе данных.\n"
-                                    "Добавьте эти материалы в раздел 'Материалы'")
-                return
+            # Список материалов для добавления: (Имя в БД, кол-во, это_метраж?)
+            # Если это метраж (Трос), то кол-во=1, длина=X
+            # Если штуки (Зажим), то кол-во=X, длина=0
+            items_to_add = [
+                ("Трос М12", rope_length, True),
+                ("Зажим М12", clamps_count, False),
+                ("Протектор (2шт)", protectors_count, False),  # Если это изделие — нужно проверять таблицу products!
+                ("Гвозди 100мм", nails_count, False)
+            ]
 
-            rope_id, rope_price = rope_result
-            clamp_id, clamp_price = clamp_result
+            for name, amount, is_length_based in items_to_add:
+                if amount <= 0:
+                    continue
 
-            # Добавляем позиции в заказ
-            for material_name, material_id, amount, price in [
-                ("Трос М12", rope_id, rope_length, rope_price),
-                ("Зажим М12", clamp_id, clamps_count, clamp_price),
-            ]:
+                # Сначала ищем в materials
+                cursor.execute("SELECT id, price, type FROM materials WHERE name = ?", (name,))
+                mat_res = cursor.fetchone()
+
+                # Если не нашли в материалах, ищем в изделиях (например Протектор может быть изделием)
+                prod_res = None
+                if not mat_res:
+                    cursor.execute("SELECT id, cost FROM products WHERE name = ?", (name,))
+                    prod_res = cursor.fetchone()
+
+                if not mat_res and not prod_res:
+                    print(f"Warning: Item '{name}' not found in DB")
+                    continue
+
                 row = self.order_table.rowCount()
                 self.order_table.insertRow(row)
 
-                # Тип позиции
-                self.order_table.setItem(row, 0, QTableWidgetItem("Материал"))
+                if mat_res:
+                    # Это МАТЕРИАЛ
+                    mid, price, mtype = mat_res
+                    self.order_table.setItem(row, 0, QTableWidgetItem("Материал"))
 
-                # Название с ID в данных
-                item = QTableWidgetItem(material_name)
-                item.setData(Qt.UserRole, material_id)
-                self.order_table.setItem(row, 1, item)
+                    name_item = QTableWidgetItem(name)
+                    name_item.setData(Qt.UserRole, mid)
+                    name_item.setData(Qt.UserRole + 1, "Материал")
 
-                # Количество (округляем зажимы до целого числа)
-                quantity_text = f"{amount:.2f}" if material_name.startswith("Трос") else str(int(amount))
-                self.order_table.setItem(row, 2, QTableWidgetItem(quantity_text))
+                    if is_length_based:  # Трос
+                        # Кол-во 1, длина = amount
+                        self.order_table.setItem(row, 2, QTableWidgetItem("1"))
 
-                # Длина (пустая для материалов)
-                self.order_table.setItem(row, 3, QTableWidgetItem(""))
+                        # Длина записывается в UserRole+2 и отображается в колонке 3
+                        name_item.setData(Qt.UserRole + 2, float(amount))
+                        self.order_table.setItem(row, 3, QTableWidgetItem(f"{amount:.2f}"))
 
-                # Стоимость
-                total_cost = amount * price
-                self.order_table.setItem(row, 4, QTableWidgetItem(f"{total_cost:.2f} руб"))
+                        total_cost = price * amount
+                    else:
+                        # Кол-во = amount, длина 0
+                        self.order_table.setItem(row, 2, QTableWidgetItem(str(int(amount))))
+                        name_item.setData(Qt.UserRole + 2, 0.0)
+                        self.order_table.setItem(row, 3, QTableWidgetItem(""))
+
+                        total_cost = price * amount
+
+                    self.order_table.setItem(row, 1, name_item)
+                    self.order_table.setItem(row, 4, QTableWidgetItem(f"{total_cost:.2f} руб"))
+
+                elif prod_res:
+                    # Это ИЗДЕЛИЕ (например Протектор)
+                    pid, cost = prod_res
+                    self.order_table.setItem(row, 0, QTableWidgetItem("Изделие"))
+
+                    name_item = QTableWidgetItem(name)
+                    name_item.setData(Qt.UserRole, pid)
+                    name_item.setData(Qt.UserRole + 1, "Изделие")
+                    self.order_table.setItem(row, 1, name_item)
+
+                    self.order_table.setItem(row, 2, QTableWidgetItem(str(int(amount))))
+                    self.order_table.setItem(row, 3, QTableWidgetItem(""))
+
+                    total_cost = cost * amount
+                    self.order_table.setItem(row, 4, QTableWidgetItem(f"{total_cost:.2f} руб"))
 
                 # Кнопка удаления
                 delete_btn = QPushButton("Удалить")
                 delete_btn.clicked.connect(partial(self.remove_from_order, row))
                 self.order_table.setCellWidget(row, 5, delete_btn)
 
-            # Обновляем кнопки удаления для всех строк
+            conn.close()
+
+            # Обновляем привязки кнопок
             for r in range(self.order_table.rowCount()):
                 widget = self.order_table.cellWidget(r, 5)
                 if isinstance(widget, QPushButton):
                     widget.clicked.disconnect()
                     widget.clicked.connect(partial(self.remove_from_order, r))
 
+            self._update_current_order()
             self.update_total_cost()
 
         except Exception as e:
